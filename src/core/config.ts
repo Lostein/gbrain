@@ -763,6 +763,22 @@ export function toEngineConfig(config: GBrainConfig): EngineConfig {
 }
 
 export function configDir(): string {
+  const rbrainOverride = process.env.RBRAIN_HOME;
+  if (rbrainOverride && rbrainOverride.trim()) {
+    const trimmed = rbrainOverride.trim();
+    if (!isAbsolute(trimmed)) {
+      throw new Error(`RBRAIN_HOME must be an absolute path; got: ${trimmed}`);
+    }
+    if (trimmed.split(/[\\/]/).includes('..')) {
+      throw new Error(`RBRAIN_HOME must not contain '..' segments; got: ${trimmed}`);
+    }
+    return join(trimmed, '.rbrain');
+  }
+
+  if (process.env.RBRAIN_MODE === '1' && !process.env.GBRAIN_HOME) {
+    return join(homedir(), '.rbrain');
+  }
+
   // Allow override for tests, Docker, and multi-tenant deployments.
   // GBRAIN_HOME is a parent dir; we always append '.gbrain' ourselves so
   // setting GBRAIN_HOME=/tmp/x yields configDir() === '/tmp/x/.gbrain'.

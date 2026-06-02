@@ -24,7 +24,7 @@ Next query is smarter (the compounding effect)
 ### Self-Installing Recipes
 
 These are integration recipes your agent can set up for you. Run
-`gbrain integrations` to see what's available and their status.
+`rbrain integrations` to see what's available and their status.
 
 | Recipe | Category | Requires | What It Does | Setup Time |
 |--------|----------|----------|-------------|------------|
@@ -32,6 +32,7 @@ These are integration recipes your agent can set up for you. Run
 | [credential-gateway](../../recipes/credential-gateway.md) | Infra | — | Gmail + Calendar access (ClawVisor or Google OAuth) | 15 min |
 | [voice-to-brain](../../recipes/twilio-voice-brain.md) | Sense | ngrok-tunnel | Phone calls create brain pages via Twilio + OpenAI Realtime | 30 min |
 | [email-to-brain](../../recipes/email-to-brain.md) | Sense | credential-gateway | Gmail messages flow into entity pages via deterministic collector | 20 min |
+| [feishu-to-rbrain](../../recipes/feishu-to-rbrain.md) | Sense | — | Feishu docs, wiki, minutes, calendar, tasks, mail, Base, approvals, and OKR become an RBrain source | 30 min |
 | [x-to-brain](../../recipes/x-to-brain.md) | Sense | — | Twitter timeline, mentions, keyword monitoring with deletion detection | 15 min |
 | [calendar-to-brain](../../recipes/calendar-to-brain.md) | Sense | credential-gateway | Google Calendar events become searchable daily brain pages | 20 min |
 | [meeting-sync](../../recipes/meeting-sync.md) | Sense | — | Circleback meeting transcripts auto-import with attendee propagation | 15 min |

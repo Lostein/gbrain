@@ -1,0 +1,229 @@
+# rbrain-feishu — Feishu-first taxonomy for RBrain.
+#
+# This pack extends gbrain-base-v2 instead of replacing it. The generic types
+# stay available, while Feishu-native sources get stable page kinds and path
+# prefixes that match lark-cli domains.
+
+api_version: gbrain-schema-pack-v1
+name: rbrain-feishu
+version: 1.0.0
+description: Feishu-first RBrain taxonomy for docs, Drive, wiki, minutes, calendar, tasks, IM, mail, Base, and approvals.
+author: RBrain
+gbrain_min_version: 0.41.29
+extends: gbrain-base-v2
+borrow_from: []
+takes_kinds:
+  - fact
+  - take
+  - bet
+  - hunch
+  - decision
+  - action-item
+  - risk
+
+page_types:
+  - name: feishu-doc
+    primitive: media
+    path_prefixes:
+      - feishu/docs/
+      - feishu/docx/
+      - feishu/wiki/docs/
+    aliases:
+      - doc
+      - docx
+      - cloud-doc
+      - lark-doc
+      - feishu-document
+    extractable: true
+    expert_routing: false
+
+  - name: feishu-drive
+    primitive: media
+    path_prefixes:
+      - feishu/drive/
+    aliases:
+      - drive
+      - drive-search
+      - doc-search
+      - lark-drive
+    extractable: true
+    expert_routing: false
+
+  - name: feishu-wiki
+    primitive: concept
+    path_prefixes:
+      - feishu/wiki/
+    aliases:
+      - wiki
+      - knowledge-base
+      - knowledge-space
+      - lark-wiki
+    extractable: true
+    expert_routing: false
+
+  - name: feishu-minutes
+    primitive: temporal
+    path_prefixes:
+      - feishu/minutes/
+      - feishu/meetings/
+      - meetings/feishu/
+    aliases:
+      - meeting
+      - meeting-note
+      - transcript
+      - lark-minutes
+    extractable: true
+    expert_routing: false
+
+  - name: feishu-calendar
+    primitive: temporal
+    path_prefixes:
+      - feishu/calendar/
+      - feishu/agenda/
+      - daily/feishu-calendar/
+    aliases:
+      - calendar
+      - agenda
+      - event
+      - schedule
+      - lark-calendar
+    extractable: true
+    expert_routing: false
+
+  - name: feishu-task
+    primitive: temporal
+    path_prefixes:
+      - feishu/tasks/
+      - feishu/task/
+      - tasks/feishu/
+    aliases:
+      - task
+      - todo
+      - action-item
+      - lark-task
+    extractable: true
+    expert_routing: false
+
+  - name: feishu-im
+    primitive: temporal
+    path_prefixes:
+      - feishu/im/
+      - feishu/chats/
+      - feishu/messages/
+    aliases:
+      - chat
+      - message
+      - group-chat
+      - lark-im
+    extractable: true
+    expert_routing: false
+
+  - name: feishu-mail
+    primitive: temporal
+    path_prefixes:
+      - feishu/mail/
+      - feishu/email/
+      - mail/feishu/
+    aliases:
+      - email
+      - mail
+      - lark-mail
+    extractable: true
+    expert_routing: false
+
+  - name: feishu-base
+    primitive: media
+    path_prefixes:
+      - feishu/base/
+      - feishu/bitable/
+      - feishu/sheets/
+    aliases:
+      - base
+      - bitable
+      - table
+      - spreadsheet
+      - lark-base
+      - lark-sheets
+    extractable: true
+    expert_routing: false
+
+  - name: feishu-approval
+    primitive: temporal
+    path_prefixes:
+      - feishu/approvals/
+      - feishu/approval/
+    aliases:
+      - approval
+      - workflow
+      - lark-approval
+    extractable: true
+    expert_routing: false
+
+  - name: feishu-okr
+    primitive: concept
+    path_prefixes:
+      - feishu/okr/
+      - okr/feishu/
+    aliases:
+      - okr
+      - objective
+      - key-result
+      - lark-okr
+    extractable: true
+    expert_routing: false
+
+frontmatter_links:
+  - page_type: feishu-minutes
+    fields:
+      - attendees
+      - speakers
+      - related_people
+    link_type: attended
+
+  - page_type: feishu-calendar
+    fields:
+      - attendees
+      - organizer
+      - meeting_room
+    link_type: attended
+
+  - page_type: feishu-task
+    fields:
+      - owner
+      - assignees
+      - collaborators
+    link_type: attributed_to
+
+  - page_type: feishu-doc
+    fields:
+      - owner
+      - collaborators
+      - reviewers
+    link_type: mentions
+
+filing_rules:
+  - kind: feishu-doc
+    directory: feishu/docs/
+    examples:
+      - feishu/docs/2026-06-01-product-review.md
+      - feishu/docs/brd-agent-governance.md
+    description: Feishu cloud docs, exported or mirrored as markdown.
+
+  - kind: feishu-drive
+    directory: feishu/drive/
+    examples:
+      - feishu/drive/search-20260601-090000.md
+    description: Feishu Drive and Wiki search result snapshots used for discovery before deep mirroring.
+
+  - kind: feishu-minutes
+    directory: feishu/minutes/
+    examples:
+      - feishu/minutes/2026-06-01-weekly-sync.md
+      - feishu/minutes/2026-06-01-customer-call.md
+    description: Feishu Minutes summaries, transcripts, chapters, and action items.
+
+  - kind: feishu-calendar
+    directory: feishu/calendar/
+    examples:
+      - feishu/calendar/2026-06-01.md
+    description: Daily agenda snapshots from Feishu Calendar.

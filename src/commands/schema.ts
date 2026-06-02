@@ -31,7 +31,6 @@ import {
   removePrefixFromType,
   removeTypeFromPack,
   resolveActivePackNameOnly,
-  loadPackFromFile,
   parseSchemaPackManifest,
   runStatsCore,
   runSyncCore,
@@ -44,6 +43,9 @@ import {
   updateTypeOnPack,
   __setPackLocatorForTests,
   _resetPackLocatorForTests,
+  BUNDLED_SCHEMA_PACK_NAMES,
+  loadPackManifestByName,
+  locatePackFileByName,
 } from '../core/schema-pack/index.ts';
 import type { SchemaPackManifest, PackPrimitive } from '../core/schema-pack/manifest-v1.ts';
 import { PACK_PRIMITIVES } from '../core/schema-pack/manifest-v1.ts';
@@ -179,7 +181,7 @@ async function runActive(_args: string[]): Promise<void> {
 }
 
 function runList(_args: string[]): void {
-  const bundled = ['gbrain-base', 'gbrain-recommended'];
+  const bundled = BUNDLED_SCHEMA_PACK_NAMES;
   const installedDir = gbrainPath('schema-packs');
   const installed: string[] = [];
   if (existsSync(installedDir)) {
@@ -217,13 +219,14 @@ async function runShow(args: string[]): Promise<void> {
   const packName = packArg;
   let manifest;
   if (packName) {
-    const path = packPathByName(packName);
-    if (!path) {
+    try {
+      manifest = loadPackManifestByName(packName).manifest;
+    } catch (e) {
+      if (!(e instanceof UnknownPackError)) throw e;
       console.error(`Unknown pack: ${packName}`);
       console.error('Run `gbrain schema list` to see available packs.');
       process.exit(1);
     }
-    manifest = loadPackFromFile(path);
   } else {
     const pack = await loadActivePack({ cfg: loadConfig(), remote: false });
     manifest = pack.manifest;
@@ -296,30 +299,28 @@ async function runShow(args: string[]): Promise<void> {
 
 function runValidate(args: string[]): void {
   const packName = args[0];
-  let path: string | null;
+  let loaded;
   if (packName) {
-    path = packPathByName(packName);
-    if (!path) {
+    try {
+      loaded = loadPackManifestByName(packName);
+    } catch (e) {
+      if (!(e instanceof UnknownPackError)) throw e;
       console.error(`Unknown pack: ${packName}`);
       process.exit(1);
     }
   } else {
-    path = packPathByName('gbrain-base');
-    if (!path) {
-      console.error('No active pack — provide a pack name.');
-      process.exit(1);
-    }
+    loaded = loadPackManifestByName('gbrain-base');
   }
   try {
-    const manifest = loadPackFromFile(path);
+    const manifest = loaded.manifest;
     console.log(`✓ ${manifest.name} v${manifest.version}: valid manifest`);
-    console.log(`  Path: ${path}`);
+    console.log(`  Path: ${loaded.source}`);
     console.log(`  Page types: ${manifest.page_types.length}`);
     console.log(`  Link verbs: ${manifest.link_types.length}`);
     console.log(`  Takes kinds: ${manifest.takes_kinds.length}`);
   } catch (e) {
     if (e instanceof SchemaPackManifestError) {
-      console.error(`✗ Invalid manifest at ${path}`);
+      console.error(`✗ Invalid manifest at ${loaded.source}`);
       console.error(`  Code: ${e.code}`);
       console.error(`  ${e.message}`);
       process.exit(1);
@@ -339,17 +340,16 @@ function runUse(args: string[]): void {
     console.error('Usage: gbrain schema use <pack-name>');
     process.exit(2);
   }
-  const path = packPathByName(packName);
-  if (!path) {
-    console.error(`Unknown pack: ${packName}`);
-    console.error('Run `gbrain schema list` to see available packs.');
-    process.exit(1);
-  }
   // Validate before activating — refuse to set a broken pack.
   try {
-    loadPackFromFile(path);
+    loadPackManifestByName(packName);
   } catch (e) {
-    console.error(`Refusing to activate ${packName}: ${(e as Error).message}`);
+    if (e instanceof UnknownPackError) {
+      console.error(`Unknown pack: ${packName}`);
+      console.error('Run `gbrain schema list` to see available packs.');
+    } else {
+      console.error(`Refusing to activate ${packName}: ${(e as Error).message}`);
+    }
     process.exit(1);
   }
   // Write to file-plane config (~/.gbrain/config.json schema_pack field).
@@ -366,24 +366,7 @@ function runUse(args: string[]): void {
 }
 
 function packPathByName(name: string): string | null {
-  if (name === 'gbrain-base') {
-    // Resolve bundled YAML — try a few locations.
-    const here = dirname(new URL(import.meta.url).pathname);
-    const candidates = [
-      join(here, '..', 'core', 'schema-pack', 'base', 'gbrain-base.yaml'),
-      join(here, '..', '..', 'src', 'core', 'schema-pack', 'base', 'gbrain-base.yaml'),
-    ];
-    for (const c of candidates) {
-      if (existsSync(c)) return c;
-    }
-    return null;
-  }
-  const baseDir = gbrainPath('schema-packs', name);
-  for (const c of ['pack.yaml', 'pack.yml', 'pack.json']) {
-    const candidate = join(baseDir, c);
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
+  return locatePackFileByName(name);
 }
 
 // Test seam — let unit tests inject the locator if needed.
@@ -598,8 +581,11 @@ async function runForkCmd(args: string[]): Promise<void> {
     console.error('Usage: gbrain schema fork <source-pack> <new-name>  (experimental)');
     process.exit(2);
   }
-  const fromPath = packPathByName(from);
-  if (!fromPath) {
+  let sourceManifest: SchemaPackManifest;
+  try {
+    sourceManifest = loadPackManifestByName(from).manifest;
+  } catch (e) {
+    if (!(e instanceof UnknownPackError)) throw e;
     console.error(`Source pack \`${from}\` not found.`);
     process.exit(1);
   }
@@ -609,7 +595,6 @@ async function runForkCmd(args: string[]): Promise<void> {
     process.exit(1);
   }
   mkdirSync(toDir, { recursive: true });
-  const sourceManifest = loadPackFromFile(fromPath);
   const forked = { ...sourceManifest, name: to, version: '0.0.1' };
   writeFileSync(join(toDir, 'pack.json'), JSON.stringify(forked, null, 2));
   if (json) {
@@ -647,14 +632,16 @@ async function runDiffCmd(args: string[]): Promise<void> {
     console.error('Usage: gbrain schema diff <pack-a> <pack-b>  (experimental)');
     process.exit(2);
   }
-  const aPath = packPathByName(a);
-  const bPath = packPathByName(b);
-  if (!aPath || !bPath) {
+  let aPack: SchemaPackManifest;
+  let bPack: SchemaPackManifest;
+  try {
+    aPack = loadPackManifestByName(a).manifest;
+    bPack = loadPackManifestByName(b).manifest;
+  } catch (e) {
+    if (!(e instanceof UnknownPackError)) throw e;
     console.error('One or both packs not found.');
     process.exit(1);
   }
-  const aPack = loadPackFromFile(aPath);
-  const bPack = loadPackFromFile(bPath);
   const aTypes = new Set(aPack.page_types.map((t) => t.name));
   const bTypes = new Set(bPack.page_types.map((t) => t.name));
   const onlyA = [...aTypes].filter((t) => !bTypes.has(t)).sort();
@@ -705,8 +692,7 @@ async function runLintCmd(args: string[]): Promise<void> {
   const cfg = loadConfig();
   let pack: SchemaPackManifest | null;
   if (name) {
-    const p = packPathByName(name);
-    try { pack = p ? loadPackFromFile(p) : null; } catch { pack = null; }
+    try { pack = loadPackManifestByName(name).manifest; } catch { pack = null; }
   } else {
     pack = (await loadActivePack({ cfg, remote: false })).manifest;
   }

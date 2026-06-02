@@ -27,7 +27,13 @@ import { fileURLToPath } from 'node:url';
 import type { GBrainConfig } from '../config.ts';
 import { gbrainPath } from '../config.ts';
 import type { SchemaPackManifest } from './manifest-v1.ts';
-import { loadPackFromFile } from './loader.ts';
+import { loadPackFromFile, loadPackFromString } from './loader.ts';
+import {
+  BUNDLED_SCHEMA_PACK_NAMES,
+  bundledSchemaPackVirtualPath,
+  getBundledSchemaPackContent,
+  isBundledSchemaPackName,
+} from './bundled.ts';
 import {
   resolveActivePackName,
   resolvePack,
@@ -69,6 +75,12 @@ export type PackLocator = (name: string) => string | null;
 
 let _packLocator: PackLocator = defaultPackLocator;
 
+export interface LoadedPackManifest {
+  manifest: SchemaPackManifest;
+  source: string;
+  bundled: boolean;
+}
+
 /**
  * Replace the pack locator. Tests use this to inject synthetic packs
  * without writing to ~/.gbrain. Always pair with `_resetPackLocatorForTests`
@@ -101,21 +113,9 @@ function defaultPackLocator(name: string): string | null {
   // resolution + 3 calibration domains), engineer (gstack-learnings bridge
   // + 3 calibration domains), everything (meta-pack stacking all three
   // via extends + borrow_from). Each ships as a real YAML at base/<name>.yaml.
-  const BUNDLED: ReadonlyArray<string> = [
-    'gbrain-base',
-    'gbrain-recommended',
-    'gbrain-creator',
-    'gbrain-investor',
-    'gbrain-engineer',
-    'gbrain-everything',
-    // v0.42 type-unification: 15-type canonical successor to gbrain-base.
-    // Ships as install default (Lane E T17) + via gbrain onboard pack
-    // upgrade flow (the unify-types Minion handler).
-    'gbrain-base-v2',
-  ];
-  if (BUNDLED.includes(name)) {
-    // Resolve bundled YAML relative to this source file. Works in both
-    // direct-bun execution and bun --compile binaries.
+  if (isBundledSchemaPackName(name)) {
+    // Resolve bundled YAML relative to this source file for worktree and
+    // package installs. Compiled binaries fall back to bundled.ts text imports.
     const here = dirname(fileURLToPath(import.meta.url));
     const bundledPath = join(here, 'base', `${name}.yaml`);
     if (existsSync(bundledPath)) return bundledPath;
@@ -139,12 +139,37 @@ function defaultPackLocator(name: string): string | null {
  * Load + parse + validate a pack by name. Used by `resolvePack` to walk
  * the extends chain. Throws UnknownPackError when the pack isn't on disk.
  */
-async function loadPackManifestByName(name: string): Promise<SchemaPackManifest> {
+export function loadPackManifestByName(name: string): LoadedPackManifest {
   const path = _packLocator(name);
-  if (!path) {
-    throw new UnknownPackError(name);
+  if (path) {
+    return {
+      manifest: loadPackFromFile(path),
+      source: path,
+      bundled: isBundledSchemaPackName(name),
+    };
   }
-  return loadPackFromFile(path);
+  // Only the default production locator may fall back to embedded bundled
+  // content. Test locators should remain authoritative.
+  if (_packLocator === defaultPackLocator) {
+    const content = getBundledSchemaPackContent(name);
+    if (content !== null) {
+      const source = bundledSchemaPackVirtualPath(name);
+      return {
+        manifest: loadPackFromString(content, source),
+        source,
+        bundled: true,
+      };
+    }
+  }
+  throw new UnknownPackError(name);
+}
+
+export function locatePackFileByName(name: string): string | null {
+  return _packLocator(name);
+}
+
+async function loadPackManifestOnlyByName(name: string): Promise<SchemaPackManifest> {
+  return loadPackManifestByName(name).manifest;
 }
 
 /**
@@ -166,10 +191,10 @@ export async function loadActivePack(input: LoadActivePackInput): Promise<Resolv
   // extends chain; cascade-invalidates and falls through on mtime change.
   const cached = tryCachedPack(resolution.pack_name);
   if (cached) return cached;
-  const manifest = await loadPackManifestByName(resolution.pack_name);
+  const manifest = loadPackManifestByName(resolution.pack_name).manifest;
   // Thread the locator so resolvePack can snapshot file paths + mtimes
   // for the stat-TTL gate on subsequent calls (codex C6 + D11 + D13).
-  return await resolvePack(manifest, loadPackManifestByName, {
+  return await resolvePack(manifest, loadPackManifestOnlyByName, {
     loadByPath: (name) => _packLocator(name),
   });
 }
@@ -209,9 +234,8 @@ export async function findPackSuccessors(
   packName: string,
   packVersion: string,
 ): Promise<ResolvedPack[]> {
-  const { BUNDLED_PACK_NAMES } = await import('./mutate.ts');
   const candidates: string[] = [];
-  for (const name of BUNDLED_PACK_NAMES) {
+  for (const name of BUNDLED_SCHEMA_PACK_NAMES) {
     if (name !== packName) candidates.push(name);
   }
   // Walk ~/.gbrain/schema-packs/* via the locator. We can't enumerate

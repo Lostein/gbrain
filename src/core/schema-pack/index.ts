@@ -89,10 +89,21 @@ export {
 } from './registry.ts';
 
 export {
+  BUNDLED_SCHEMA_PACK_NAMES,
+  bundledSchemaPackVirtualPath,
+  getBundledSchemaPackContent,
+  isBundledSchemaPackName,
+  type BundledSchemaPackName,
+} from './bundled.ts';
+
+export {
   loadActivePack,
+  loadPackManifestByName,
+  locatePackFileByName,
   resolveActivePackNameOnly,
   __setPackLocatorForTests,
   _resetPackLocatorForTests,
+  type LoadedPackManifest,
   type LoadActivePackInput,
   type PackLocator,
 } from './load-active.ts';
