@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import {
   FEISHU_DOCTOR_CAPABILITY_CHECKS,
   FEISHU_MIRROR_DIRS,
+  buildAilyEnvExample,
   buildAilyAssetTitle,
   buildApprovalInitiatedMarkdown,
   buildApprovalInitiatedScript,
@@ -42,6 +43,7 @@ import {
   buildMailTriageMarkdown,
   buildMailTriageScript,
   buildMirrorReadme,
+  buildMirrorGitignore,
   buildMinutesSearchScript,
   buildMinutesSearchMarkdown,
   buildOkrCycleDetailMarkdown,
@@ -127,10 +129,20 @@ describe('rbrain feishu command helpers', () => {
       expect(body).toContain('pull-feishu-im-chat-messages.sh');
       expect(body).toContain('refresh-feishu.sh');
       expect(body).toContain('feishu aily push-space --space-id knowledge_space_xxx --dry-run');
+      expect(body).toContain('copy `.env.aily.example` to `.env`');
     } finally {
       if (prev === undefined) delete process.env.RBRAIN_MODE;
       else process.env.RBRAIN_MODE = prev;
     }
+  });
+
+  test('mirror env templates keep real Aily secrets out of Git', () => {
+    expect(buildMirrorGitignore()).toContain('.env\n');
+    expect(buildMirrorGitignore()).toContain('.env.*\n');
+    expect(buildMirrorGitignore()).toContain('!.env.*.example');
+    expect(buildAilyEnvExample()).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_ID=knowledge_space_xxx');
+    expect(buildAilyEnvExample()).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=');
+    expect(buildAilyEnvExample()).not.toContain('DWL');
   });
 
   test('agenda script writes feishu-calendar markdown with provenance', () => {
@@ -315,7 +327,8 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('pull im-message-search [--query TEXT]');
     expect(stdout).toContain('status [--source-id feishu]');
     expect(stdout).toContain('Show Feishu mirror/source readiness');
-    expect(stdout).toContain('aily push-space --space-id knowledge_space_xxx');
+    expect(stdout).toContain('aily push-space [--space-id knowledge_space_xxx]');
+    expect(stdout).toContain('--env-file FILE');
     expect(stdout).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN');
   });
 

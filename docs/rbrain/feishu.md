@@ -94,11 +94,12 @@ an Aily `spring_xxx__c` app id. It is an ingestion path: it uploads or updates
 knowledge assets, while question answering still needs an Aily agent or ask
 surface on top of the knowledge space.
 
-Keep the knowledge-space API token outside the repo:
+Keep the knowledge-space API token outside the repo. The generated mirror
+includes `.env.aily.example`; copy it to `.env` and fill in real values:
 
 ```bash
-export RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN='...'
-export RBRAIN_AILY_KNOWLEDGE_SPACE_ID='knowledge_space_xxx'
+cp ~/rbrain-feishu/.env.aily.example ~/rbrain-feishu/.env
+$EDITOR ~/rbrain-feishu/.env
 ```
 
 Preview what would be uploaded:
@@ -117,6 +118,10 @@ If an API-created asset with the same deterministic title already exists,
 RBrain skips it by default. Pass `--replace` to update those assets in place.
 Use `--host https://aily.feishu.cn` if your tenant requires the Aily host
 instead of the default `https://apaas.feishu.cn`.
+
+The command reads `.env` from the current directory, the Feishu mirror root, or
+an explicit `--env-file`. Real `.env` files are ignored by Git; only
+`.env.*.example` templates should be committed.
 
 ## Schema Pack
 

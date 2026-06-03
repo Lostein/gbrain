@@ -150,6 +150,7 @@ describe('rbrain feishu smoke', () => {
     expect(readyStatus.source.last_sync_at).toBeTruthy();
     expect(readyStatus.mirror.snapshots.find((s) => s.domain === 'calendar')?.markdown_files).toBe(1);
 
+    writeFileSync(join(mirror, '.env'), 'RBRAIN_AILY_KNOWLEDGE_SPACE_ID=knowledge_space_test\n', 'utf-8');
     const ailyDryRun = parseJsonStdout<{
       status: 'ok';
       dry_run: boolean;
@@ -159,8 +160,6 @@ describe('rbrain feishu smoke', () => {
       'feishu',
       'aily',
       'push-space',
-      '--space-id',
-      'knowledge_space_test',
       '--dry-run',
       '--json',
     ], { home, fakeBin }));

@@ -240,6 +240,7 @@ interface AilyPushSpaceOpts {
   host: string;
   knowledgeSpaceId: string;
   tokenEnv: string;
+  envFile?: string;
   sourceUrlBase: string;
   limit?: number;
   replace: boolean;
@@ -370,6 +371,7 @@ export interface AilyPushSpaceResult {
 }
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+type EnvLookup = Record<string, string | undefined>;
 
 function brand(): string {
   return process.env.RBRAIN_MODE === '1' ? 'rbrain' : 'gbrain';
@@ -702,6 +704,7 @@ function parseAilyPositionals(args: string[]): string[] {
     '--space-id',
     '--knowledge-space-id',
     '--token-env',
+    '--env-file',
     '--source-url-base',
     '--limit',
   ]);
@@ -725,15 +728,19 @@ function normalizeAilyHost(input: string): string {
   return trimmed;
 }
 
-function parseAilyPushSpace(args: string[]): AilyPushSpaceOpts {
+function parseAilyPushSpace(
+  args: string[],
+  env: EnvLookup = process.env,
+  opts: { requireKnowledgeSpaceId?: boolean } = {},
+): AilyPushSpaceOpts {
   const positionals = parseAilyPositionals(args);
   const knowledgeSpaceId =
     parseFlagValue(args, '--space-id') ??
     parseFlagValue(args, '--knowledge-space-id') ??
     positionals[0] ??
-    process.env[AILY_DEFAULT_SPACE_ID_ENV] ??
-    process.env[AILY_FALLBACK_SPACE_ID_ENV];
-  if (!knowledgeSpaceId) {
+    env[AILY_DEFAULT_SPACE_ID_ENV] ??
+    env[AILY_FALLBACK_SPACE_ID_ENV];
+  if (!knowledgeSpaceId && opts.requireKnowledgeSpaceId !== false) {
     throw new Error(
       `Usage: ${brand()} feishu aily push-space --space-id <knowledge_space_xxx> ` +
       `[--path DIR] [--dry-run]\n` +
@@ -744,9 +751,10 @@ function parseAilyPushSpace(args: string[]): AilyPushSpaceOpts {
   return {
     path: parseFlagValue(args, '--path') ? expandPath(parseFlagValue(args, '--path')!) : undefined,
     sourceId: parseFlagValue(args, '--source-id') ?? 'feishu',
-    host: normalizeAilyHost(parseFlagValue(args, '--host') ?? process.env.RBRAIN_AILY_HOST ?? process.env.AILY_HOST ?? AILY_DEFAULT_HOST),
-    knowledgeSpaceId,
+    host: normalizeAilyHost(parseFlagValue(args, '--host') ?? env.RBRAIN_AILY_HOST ?? env.AILY_HOST ?? AILY_DEFAULT_HOST),
+    knowledgeSpaceId: knowledgeSpaceId ?? '',
     tokenEnv: parseFlagValue(args, '--token-env') ?? AILY_DEFAULT_TOKEN_ENV,
+    envFile: parseFlagValue(args, '--env-file') ? expandPath(parseFlagValue(args, '--env-file')!) : undefined,
     sourceUrlBase: normalizeAilyHost(parseFlagValue(args, '--source-url-base') ?? AILY_DEFAULT_SOURCE_URL_BASE),
     limit: parsePositiveIntFlag(args, '--limit'),
     replace: args.includes('--replace'),
@@ -765,6 +773,56 @@ function parseJsonObject(input: unknown): Record<string, unknown> {
     }
   }
   return input && typeof input === 'object' ? input as Record<string, unknown> : {};
+}
+
+function parseDotEnv(input: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const rawLine of input.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const withoutExport = line.startsWith('export ') ? line.slice('export '.length).trimStart() : line;
+    const eq = withoutExport.indexOf('=');
+    if (eq <= 0) continue;
+    const key = withoutExport.slice(0, eq).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    let value = withoutExport.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      const quote = value[0]!;
+      value = value.slice(1, -1);
+      if (quote === '"') {
+        value = value
+          .replace(/\\n/g, '\n')
+          .replace(/\\r/g, '\r')
+          .replace(/\\t/g, '\t')
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, '\\');
+      }
+    } else {
+      const hash = value.search(/\s#/);
+      if (hash !== -1) value = value.slice(0, hash).trimEnd();
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+function readDotEnv(path: string | undefined): Record<string, string> {
+  if (!path || !existsSync(path)) return {};
+  return parseDotEnv(readFileSync(path, 'utf-8'));
+}
+
+function loadAilyEnv(args: string[], root?: string): EnvLookup {
+  const initialEnvFile = parseFlagValue(args, '--env-file');
+  const explicitEnvFile = initialEnvFile ? expandPath(initialEnvFile) : undefined;
+  return {
+    ...(root ? readDotEnv(join(root, '.env')) : {}),
+    ...readDotEnv(join(process.cwd(), '.env')),
+    ...readDotEnv(explicitEnvFile),
+    ...process.env,
+  };
 }
 
 function runLocalCommand(
@@ -887,7 +945,7 @@ function ensureGitRepository(root: string, enabled: boolean): MirrorGitStatus {
   }
 
   ensureGitIdentity(root);
-  runLocalCommand(['git', 'add', 'README.md', 'feishu', 'scripts'], { cwd: root });
+  runLocalCommand(['git', 'add', 'README.md', '.gitignore', '.env.aily.example', 'feishu', 'scripts'], { cwd: root });
   const staged = runLocalCommand(['git', 'diff', '--cached', '--quiet'], { cwd: root });
   if (staged.ok) {
     return { repository: hadGit ? 'existing' : 'initialized', commit: 'clean' };
@@ -1526,6 +1584,27 @@ into a knowledge space:
 ${brand()} feishu aily push-space --space-id knowledge_space_xxx --dry-run
 ${AILY_DEFAULT_TOKEN_ENV}=... ${brand()} feishu aily push-space --space-id knowledge_space_xxx
 \`\`\`
+
+For local use, copy \`.env.aily.example\` to \`.env\` and fill in the real
+knowledge-space values. \`.env\` is ignored by this mirror's Git repo.
+`;
+}
+
+export function buildMirrorGitignore(): string {
+  return `.env
+.env.*
+!.env.*.example
+.DS_Store
+*.log
+`;
+}
+
+export function buildAilyEnvExample(): string {
+  return `# Copy this file to .env and fill in real values.
+# .env is ignored by the generated Feishu mirror Git repository.
+RBRAIN_AILY_KNOWLEDGE_SPACE_ID=knowledge_space_xxx
+RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=
+# RBRAIN_AILY_HOST=https://apaas.feishu.cn
 `;
 }
 
@@ -3094,6 +3173,8 @@ function createMirror(opts: InitOpts): MirrorInitResult {
   }
 
   const readmePath = join(opts.path, 'README.md');
+  const gitignorePath = join(opts.path, '.gitignore');
+  const ailyEnvExamplePath = join(opts.path, '.env.aily.example');
   const agendaScriptPath = join(opts.path, 'scripts', 'pull-feishu-agenda.sh');
   const docScriptPath = join(opts.path, 'scripts', 'pull-feishu-doc.sh');
   const docListScriptPath = join(opts.path, 'scripts', 'pull-feishu-docs-list.sh');
@@ -3119,6 +3200,8 @@ function createMirror(opts: InitOpts): MirrorInitResult {
   const tasksScriptPath = join(opts.path, 'scripts', 'pull-feishu-tasks.sh');
   const refreshScriptPath = join(opts.path, 'scripts', 'refresh-feishu.sh');
   const readmeStatus = writeIfNeeded(readmePath, buildMirrorReadme(opts.path), opts.force);
+  const gitignoreStatus = writeIfNeeded(gitignorePath, buildMirrorGitignore(), opts.force);
+  const ailyEnvExampleStatus = writeIfNeeded(ailyEnvExamplePath, buildAilyEnvExample(), opts.force);
   const agendaStatus = writeIfNeeded(agendaScriptPath, buildAgendaScript(opts.path), opts.force, 0o755);
   const docStatus = writeIfNeeded(docScriptPath, buildDocScript(opts.path), opts.force, 0o755);
   const docListStatus = writeIfNeeded(docListScriptPath, buildDocListScript(opts.path), opts.force, 0o755);
@@ -3151,6 +3234,8 @@ function createMirror(opts: InitOpts): MirrorInitResult {
     dirs,
     files: [
       { path: readmePath, status: readmeStatus },
+      { path: gitignorePath, status: gitignoreStatus },
+      { path: ailyEnvExamplePath, status: ailyEnvExampleStatus },
       { path: agendaScriptPath, status: agendaStatus },
       { path: docScriptPath, status: docStatus },
       { path: docListScriptPath, status: docListStatus },
@@ -4172,11 +4257,11 @@ export function collectAilyPushCandidates(
   });
 }
 
-function resolveAilyApiToken(tokenEnv: string): { token: string; source: string } {
-  const primary = process.env[tokenEnv];
+function resolveAilyApiToken(tokenEnv: string, env: EnvLookup = process.env): { token: string; source: string } {
+  const primary = env[tokenEnv];
   if (primary) return { token: primary, source: tokenEnv };
-  if (tokenEnv === AILY_DEFAULT_TOKEN_ENV && process.env[AILY_FALLBACK_TOKEN_ENV]) {
-    return { token: process.env[AILY_FALLBACK_TOKEN_ENV]!, source: AILY_FALLBACK_TOKEN_ENV };
+  if (tokenEnv === AILY_DEFAULT_TOKEN_ENV && env[AILY_FALLBACK_TOKEN_ENV]) {
+    return { token: env[AILY_FALLBACK_TOKEN_ENV]!, source: AILY_FALLBACK_TOKEN_ENV };
   }
   throw new Error(
     `Missing Aily knowledge space API token. Set ${tokenEnv}` +
@@ -4557,11 +4642,14 @@ async function runAily(engine: BrainEngine, args: string[]): Promise<void> {
     throw new Error(`Usage: ${brand()} feishu aily push-space --space-id <knowledge_space_xxx> [--dry-run]`);
   }
 
-  const opts = parseAilyPushSpace(args.slice(1));
-  const root = await resolveMirrorRoot(engine, opts);
+  const rawArgs = args.slice(1);
+  const initialOpts = parseAilyPushSpace(rawArgs, loadAilyEnv(rawArgs), { requireKnowledgeSpaceId: false });
+  const root = await resolveMirrorRoot(engine, initialOpts);
+  const env = loadAilyEnv(rawArgs, root);
+  const opts = parseAilyPushSpace(rawArgs, env);
   const token = opts.dryRun
     ? { token: '', source: '(not needed for dry-run)' }
-    : resolveAilyApiToken(opts.tokenEnv);
+    : resolveAilyApiToken(opts.tokenEnv, env);
   const payload = await pushAilyKnowledgeSpace({
     root,
     host: opts.host,
@@ -4773,9 +4861,10 @@ COMMANDS
   doctor [--json]
       Check lark-cli, Feishu auth health, and the rbrain-feishu schema pack.
 
-  aily push-space --space-id knowledge_space_xxx [--path DIR] [--dry-run]
+  aily push-space [--space-id knowledge_space_xxx] [--path DIR] [--env-file FILE] [--dry-run]
       Upload Feishu mirror markdown snapshots to an Aily knowledge space.
       Uses ${AILY_DEFAULT_TOKEN_ENV} (or ${AILY_FALLBACK_TOKEN_ENV}) for x-api-token.
+      Reads .env from the current directory, the mirror root, or --env-file.
       Existing API-created assets are skipped unless --replace is passed.
 
 EXAMPLES
