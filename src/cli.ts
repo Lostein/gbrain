@@ -902,7 +902,7 @@ async function handleCliOnly(command: string, args: string[]) {
   }
   if (command === 'feishu') {
     const { runFeishu } = await import('./commands/feishu.ts');
-    if ((args[0] === 'setup' || args[0] === 'pull' || args[0] === 'refresh' || args[0] === 'status') && !hasHelpFlag(args)) {
+    if ((args[0] === 'setup' || args[0] === 'pull' || args[0] === 'refresh' || args[0] === 'status' || args[0] === 'aily') && !hasHelpFlag(args)) {
       const engine = await connectEngine();
       try {
         await runFeishu(args, { engine });
@@ -1922,7 +1922,7 @@ SETUP
   check-update [--json]              Check for new versions
   doctor [--json] [--fast]            Health check (resolver, skills, pgvector, RLS, embeddings)
   integrations [subcommand]          Manage integration recipes (senses + reflexes)
-  feishu <init|setup|pull|refresh|status|doctor>
+  feishu <init|setup|pull|refresh|status|aily|doctor>
                                       Feishu mirror helpers for RBrain
 
 PAGES

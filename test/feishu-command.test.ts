@@ -1,9 +1,13 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import matter from 'gray-matter';
 import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   FEISHU_DOCTOR_CAPABILITY_CHECKS,
   FEISHU_MIRROR_DIRS,
+  buildAilyAssetTitle,
   buildApprovalInitiatedMarkdown,
   buildApprovalInitiatedScript,
   buildApprovalTasksMarkdown,
@@ -51,10 +55,26 @@ import {
   buildWikiNodesScript,
   buildWikiSpacesMarkdown,
   buildWikiSpacesScript,
+  collectAilyPushCandidates,
   expandPath,
   normalizeDocSlug,
   parseDocManifest,
+  pushAilyKnowledgeSpace,
 } from '../src/commands/feishu.ts';
+
+const cleanupPaths: string[] = [];
+
+afterEach(() => {
+  for (const path of cleanupPaths.splice(0)) {
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
+function makeTempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  cleanupPaths.push(dir);
+  return dir;
+}
 
 describe('rbrain feishu command helpers', () => {
   test('mirror layout includes Feishu work domains used by rbrain-feishu pack', () => {
@@ -106,6 +126,7 @@ describe('rbrain feishu command helpers', () => {
       expect(body).toContain('pull-feishu-im-message-search.sh');
       expect(body).toContain('pull-feishu-im-chat-messages.sh');
       expect(body).toContain('refresh-feishu.sh');
+      expect(body).toContain('feishu aily push-space --space-id knowledge_space_xxx --dry-run');
     } finally {
       if (prev === undefined) delete process.env.RBRAIN_MODE;
       else process.env.RBRAIN_MODE = prev;
@@ -294,6 +315,110 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('pull im-message-search [--query TEXT]');
     expect(stdout).toContain('status [--source-id feishu]');
     expect(stdout).toContain('Show Feishu mirror/source readiness');
+    expect(stdout).toContain('aily push-space --space-id knowledge_space_xxx');
+    expect(stdout).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN');
+  });
+
+  test('Aily push candidates convert mirror markdown to deterministic txt assets', () => {
+    const root = makeTempDir('rbrain-feishu-aily-');
+    const dir = join(root, 'feishu', 'docs');
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, 'roadmap.md');
+    writeFileSync(file, [
+      '---',
+      'type: feishu-doc',
+      'title: Roadmap',
+      'feishu_url: https://example.feishu.cn/docx/abc',
+      '---',
+      '',
+      '# Roadmap',
+      '',
+      'Planning notes.',
+      '',
+    ].join('\n'), 'utf-8');
+
+    const candidates = collectAilyPushCandidates(root);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]!.relative_path).toBe('feishu/docs/roadmap.md');
+    expect(candidates[0]!.title).toBe(buildAilyAssetTitle('feishu/docs/roadmap.md'));
+    expect(candidates[0]!.title).toMatch(/\.txt$/);
+    expect(candidates[0]!.source_url).toBe('https://example.feishu.cn/docx/abc');
+    expect(candidates[0]!.content_sha256).toHaveLength(64);
+  });
+
+  test('Aily push creates missing assets without leaking the API token', async () => {
+    const root = makeTempDir('rbrain-feishu-aily-create-');
+    const dir = join(root, 'feishu', 'calendar');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '2026-06-04.md'), '# Daily agenda\n\nPlanning notes.\n', 'utf-8');
+
+    const calls: Array<{ url: string; init: RequestInit; body: Record<string, unknown> | null }> = [];
+    const fakeFetch = async (url: string, init?: RequestInit): Promise<Response> => {
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : null;
+      calls.push({ url, init: init ?? {}, body });
+      if (init?.method === 'GET') {
+        return new Response(JSON.stringify({
+          status_code: '0',
+          data: { knowledge_assets: [], has_more: false, total: 0 },
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        status_code: '0',
+        data: { knowledge_asset: { knowledge_asset_id: 'knowledge_asset_test', status: 'learning' } },
+      }), { status: 200 });
+    };
+
+    const result = await pushAilyKnowledgeSpace({
+      root,
+      host: 'https://apaas.feishu.cn',
+      knowledgeSpaceId: 'knowledge_space_test',
+      token: 'secret-token',
+      fetchImpl: fakeFetch,
+    });
+
+    expect(result.created).toBe(1);
+    expect(result.failed).toBe(0);
+    expect(JSON.stringify(result)).not.toContain('secret-token');
+    const post = calls.find((call) => call.init.method === 'POST');
+    expect(post).toBeTruthy();
+    expect((post!.init.headers as Record<string, string>)['x-api-token']).toBe('secret-token');
+    expect(post!.body?.knowledge_space_id).toBe('knowledge_space_test');
+    expect(String(post!.body?.title)).toMatch(/\.txt$/);
+    expect(Buffer.from(String(post!.body?.content), 'base64').toString('utf-8')).toContain('Daily agenda');
+  });
+
+  test('Aily push skips existing assets unless replace is requested', async () => {
+    const root = makeTempDir('rbrain-feishu-aily-skip-');
+    const dir = join(root, 'feishu', 'tasks');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'my-tasks-2026-06-04.md'), '# Tasks\n', 'utf-8');
+    const title = buildAilyAssetTitle('feishu/tasks/my-tasks-2026-06-04.md');
+
+    const calls: Array<{ method?: string }> = [];
+    const fakeFetch = async (_url: string, init?: RequestInit): Promise<Response> => {
+      calls.push({ method: init?.method });
+      return new Response(JSON.stringify({
+        status_code: '0',
+        data: {
+          knowledge_assets: [{ name: title, knowledge_asset_id: 'knowledge_asset_existing', status: 'successful' }],
+          has_more: false,
+          total: 1,
+        },
+      }), { status: 200 });
+    };
+
+    const result = await pushAilyKnowledgeSpace({
+      root,
+      host: 'https://apaas.feishu.cn',
+      knowledgeSpaceId: 'knowledge_space_test',
+      token: 'secret-token',
+      fetchImpl: fakeFetch,
+    });
+
+    expect(result.created).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(result.assets[0]!.action).toBe('skipped_existing');
+    expect(calls.map((call) => call.method)).toEqual(['GET']);
   });
 
   test('expandPath resolves tilde paths', () => {

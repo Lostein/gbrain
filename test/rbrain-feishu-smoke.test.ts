@@ -150,6 +150,25 @@ describe('rbrain feishu smoke', () => {
     expect(readyStatus.source.last_sync_at).toBeTruthy();
     expect(readyStatus.mirror.snapshots.find((s) => s.domain === 'calendar')?.markdown_files).toBe(1);
 
+    const ailyDryRun = parseJsonStdout<{
+      status: 'ok';
+      dry_run: boolean;
+      candidates: number;
+      assets: Array<{ action: string; title: string }>;
+    }>(runRbrain([
+      'feishu',
+      'aily',
+      'push-space',
+      '--space-id',
+      'knowledge_space_test',
+      '--dry-run',
+      '--json',
+    ], { home, fakeBin }));
+    expect(ailyDryRun.dry_run).toBe(true);
+    expect(ailyDryRun.candidates).toBe(1);
+    expect(ailyDryRun.assets[0]!.action).toBe('dry_run_create');
+    expect(ailyDryRun.assets[0]!.title).toMatch(/\.txt$/);
+
     const search = runRbrain(['search', 'planning', '--source', 'feishu', '--limit', '5'], { home, fakeBin });
     expect(search.code, search.stderr).toBe(0);
     expect(search.stdout).toContain('Daily planning');

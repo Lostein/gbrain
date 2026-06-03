@@ -86,6 +86,38 @@ rbrain feishu pull im-flags --page-all --sync
 rbrain embed --stale --source feishu
 ```
 
+## Aily Knowledge Space Backend
+
+RBrain can also push the local Feishu mirror into a Feishu Aily knowledge
+space. This uses Aily's knowledge space management API, so it does not require
+an Aily `spring_xxx__c` app id. It is an ingestion path: it uploads or updates
+knowledge assets, while question answering still needs an Aily agent or ask
+surface on top of the knowledge space.
+
+Keep the knowledge-space API token outside the repo:
+
+```bash
+export RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN='...'
+export RBRAIN_AILY_KNOWLEDGE_SPACE_ID='knowledge_space_xxx'
+```
+
+Preview what would be uploaded:
+
+```bash
+rbrain feishu aily push-space --dry-run
+```
+
+Upload missing mirror snapshots as `.txt` knowledge assets:
+
+```bash
+rbrain feishu aily push-space
+```
+
+If an API-created asset with the same deterministic title already exists,
+RBrain skips it by default. Pass `--replace` to update those assets in place.
+Use `--host https://aily.feishu.cn` if your tenant requires the Aily host
+instead of the default `https://apaas.feishu.cn`.
+
 ## Schema Pack
 
 `rbrain-feishu` extends `gbrain-base-v2` with Feishu-native page types:
@@ -160,6 +192,7 @@ rbrain feishu pull im-chat-search --query "项目群" --sync
 rbrain feishu pull im-message-search --query "pricing" --sync
 rbrain feishu pull im-chat-messages --chat-id oc_xxx --start 2026-06-01T00:00:00+08:00 --sync
 rbrain feishu pull im-flags --page-all --sync
+rbrain feishu aily push-space --dry-run
 ```
 
 The mirror also includes a stable wrapper for cron or launchd:
@@ -262,6 +295,7 @@ rbrain feishu pull approval-tasks --page-all --sync
 rbrain feishu pull okr-cycles --time-range 2026-01--2026-06 --sync
 rbrain feishu pull base-records --base-token appxxx --table-id tblxxx --field-id Status --sync
 rbrain feishu pull im-message-search --query "pricing" --sync
+rbrain feishu aily push-space --space-id knowledge_space_xxx --dry-run
 rbrain feishu doctor
 rbrain integrations show feishu-to-rbrain
 rbrain schema active

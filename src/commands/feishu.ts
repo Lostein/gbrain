@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, writeFileSync, chmodSync, readdirSync, statSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -24,6 +24,14 @@ export const FEISHU_MIRROR_DIRS = [
 ] as const;
 
 const FEISHU_STATUS_DIRS = FEISHU_MIRROR_DIRS.filter((dir) => dir.startsWith('feishu/'));
+
+const AILY_DEFAULT_HOST = 'https://apaas.feishu.cn';
+const AILY_DEFAULT_SOURCE_URL_BASE = 'https://rbrain.local/feishu-mirror';
+const AILY_DEFAULT_TOKEN_ENV = 'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN';
+const AILY_FALLBACK_TOKEN_ENV = 'AILY_KNOWLEDGE_SPACE_API_TOKEN';
+const AILY_DEFAULT_SPACE_ID_ENV = 'RBRAIN_AILY_KNOWLEDGE_SPACE_ID';
+const AILY_FALLBACK_SPACE_ID_ENV = 'AILY_KNOWLEDGE_SPACE_ID';
+const AILY_MAX_ASSET_BYTES = 30 * 1024 * 1024;
 
 export const FEISHU_DOCTOR_CAPABILITY_CHECKS = [
   { id: 'collector:calendar-agenda', argv: ['lark-cli', 'calendar', '+agenda', '--help'] },
@@ -226,6 +234,19 @@ interface StatusOpts {
   json: boolean;
 }
 
+interface AilyPushSpaceOpts {
+  path?: string;
+  sourceId: string;
+  host: string;
+  knowledgeSpaceId: string;
+  tokenEnv: string;
+  sourceUrlBase: string;
+  limit?: number;
+  replace: boolean;
+  dryRun: boolean;
+  json: boolean;
+}
+
 interface FeishuContext {
   engine?: BrainEngine;
 }
@@ -306,6 +327,49 @@ interface MirrorGitInspection {
   dirty_files: number;
   error?: string;
 }
+
+export interface AilyPushCandidate {
+  path: string;
+  relative_path: string;
+  title: string;
+  source_url: string;
+  bytes: number;
+  content_sha256: string;
+}
+
+export type AilyPushAction =
+  | 'created'
+  | 'updated'
+  | 'skipped_existing'
+  | 'skipped_oversize'
+  | 'dry_run_create'
+  | 'dry_run_update'
+  | 'dry_run_skip_existing'
+  | 'failed';
+
+export interface AilyPushItemResult extends AilyPushCandidate {
+  action: AilyPushAction;
+  knowledge_asset_id?: string;
+  asset_status?: string;
+  error?: string;
+}
+
+export interface AilyPushSpaceResult {
+  status: 'ok' | 'partial';
+  host: string;
+  knowledge_space_id: string;
+  path: string;
+  dry_run: boolean;
+  replace: boolean;
+  candidates: number;
+  created: number;
+  updated: number;
+  skipped: number;
+  failed: number;
+  assets: AilyPushItemResult[];
+}
+
+type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 function brand(): string {
   return process.env.RBRAIN_MODE === '1' ? 'rbrain' : 'gbrain';
@@ -616,6 +680,77 @@ function parseStatus(args: string[]): StatusOpts {
   return {
     path: parseFlagValue(args, '--path') ? expandPath(parseFlagValue(args, '--path')!) : undefined,
     sourceId: parseFlagValue(args, '--source-id') ?? 'feishu',
+    json: args.includes('--json'),
+  };
+}
+
+function parsePositiveIntFlag(args: string[], name: string): number | undefined {
+  const raw = parseFlagValue(args, name);
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
+function parseAilyPositionals(args: string[]): string[] {
+  const valueFlags = new Set([
+    '--path',
+    '--source-id',
+    '--host',
+    '--space-id',
+    '--knowledge-space-id',
+    '--token-env',
+    '--source-url-base',
+    '--limit',
+  ]);
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg.startsWith('--')) {
+      if (valueFlags.has(arg) && i + 1 < args.length) i++;
+      continue;
+    }
+    out.push(arg);
+  }
+  return out;
+}
+
+function normalizeAilyHost(input: string): string {
+  const trimmed = input.trim().replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(trimmed)) {
+    throw new Error(`Aily host must be an http(s) URL: ${input}`);
+  }
+  return trimmed;
+}
+
+function parseAilyPushSpace(args: string[]): AilyPushSpaceOpts {
+  const positionals = parseAilyPositionals(args);
+  const knowledgeSpaceId =
+    parseFlagValue(args, '--space-id') ??
+    parseFlagValue(args, '--knowledge-space-id') ??
+    positionals[0] ??
+    process.env[AILY_DEFAULT_SPACE_ID_ENV] ??
+    process.env[AILY_FALLBACK_SPACE_ID_ENV];
+  if (!knowledgeSpaceId) {
+    throw new Error(
+      `Usage: ${brand()} feishu aily push-space --space-id <knowledge_space_xxx> ` +
+      `[--path DIR] [--dry-run]\n` +
+      `Or set ${AILY_DEFAULT_SPACE_ID_ENV}.`,
+    );
+  }
+
+  return {
+    path: parseFlagValue(args, '--path') ? expandPath(parseFlagValue(args, '--path')!) : undefined,
+    sourceId: parseFlagValue(args, '--source-id') ?? 'feishu',
+    host: normalizeAilyHost(parseFlagValue(args, '--host') ?? process.env.RBRAIN_AILY_HOST ?? process.env.AILY_HOST ?? AILY_DEFAULT_HOST),
+    knowledgeSpaceId,
+    tokenEnv: parseFlagValue(args, '--token-env') ?? AILY_DEFAULT_TOKEN_ENV,
+    sourceUrlBase: normalizeAilyHost(parseFlagValue(args, '--source-url-base') ?? AILY_DEFAULT_SOURCE_URL_BASE),
+    limit: parsePositiveIntFlag(args, '--limit'),
+    replace: args.includes('--replace'),
+    dryRun: args.includes('--dry-run'),
     json: args.includes('--json'),
   };
 }
@@ -1383,6 +1518,14 @@ Run \`scripts/pull-feishu-im-message-search.sh\` and
 Run \`scripts/refresh-feishu.sh\` for the daily agenda + tasks refresh.
 Collection scripts commit each new snapshot locally so \`${brand()} sync --source feishu\`
 can import the latest Feishu state.
+
+To use Aily as the managed knowledge backend, push committed mirror snapshots
+into a knowledge space:
+
+\`\`\`bash
+${brand()} feishu aily push-space --space-id knowledge_space_xxx --dry-run
+${AILY_DEFAULT_TOKEN_ENV}=... ${brand()} feishu aily push-space --space-id knowledge_space_xxx
+\`\`\`
 `;
 }
 
@@ -3951,6 +4094,299 @@ function formatSnapshotSummary(snapshots: SnapshotDomainStatus[]): string {
   return active.map((snapshot) => `${snapshot.domain} ${snapshot.markdown_files}`).join(', ');
 }
 
+function isHttpUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || value.trim() === '') return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function encodePathForUrl(path: string): string {
+  return path.split('/').map((part) => encodeURIComponent(part)).join('/');
+}
+
+function extractAilySourceUrl(content: string, relativePath: string, sourceUrlBase: string): string {
+  try {
+    const parsed = matter(content);
+    const data = parsed.data as Record<string, unknown>;
+    for (const key of ['feishu_url', 'source_url', 'url']) {
+      if (isHttpUrl(data[key])) return data[key];
+    }
+  } catch {
+    // Fall back to a deterministic synthetic URL when frontmatter is malformed.
+  }
+  return `${sourceUrlBase}/${encodePathForUrl(relativePath)}`;
+}
+
+export function buildAilyAssetTitle(relativePath: string): string {
+  const withoutExt = relativePath.replace(/\.md$/i, '');
+  const safe = withoutExt
+    .replace(/[\\/]+/g, '-')
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^\.+/, '')
+    .replace(/^[-_]+|[-_]+$/g, '')
+    .slice(0, 96);
+  const hash = createHash('sha256').update(relativePath).digest('hex').slice(0, 12);
+  return `rbrain-feishu-${safe || 'snapshot'}-${hash}.txt`;
+}
+
+function collectMarkdownPaths(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith('.')) continue;
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...collectMarkdownPaths(path));
+    } else if (entry.isFile() && entry.name.endsWith('.md')) {
+      out.push(path);
+    }
+  }
+  return out;
+}
+
+export function collectAilyPushCandidates(
+  root: string,
+  opts: { limit?: number; sourceUrlBase?: string } = {},
+): AilyPushCandidate[] {
+  const feishuRoot = join(root, 'feishu');
+  const sourceUrlBase = opts.sourceUrlBase ?? AILY_DEFAULT_SOURCE_URL_BASE;
+  const files = collectMarkdownPaths(feishuRoot)
+    .sort((a, b) => a.localeCompare(b))
+    .slice(0, opts.limit);
+  return files.map((path) => {
+    const content = readFileSync(path, 'utf-8');
+    const relativePath = relative(root, path).replace(/\\/g, '/');
+    return {
+      path,
+      relative_path: relativePath,
+      title: buildAilyAssetTitle(relativePath),
+      source_url: extractAilySourceUrl(content, relativePath, sourceUrlBase),
+      bytes: statSync(path).size,
+      content_sha256: createHash('sha256').update(content).digest('hex'),
+    };
+  });
+}
+
+function resolveAilyApiToken(tokenEnv: string): { token: string; source: string } {
+  const primary = process.env[tokenEnv];
+  if (primary) return { token: primary, source: tokenEnv };
+  if (tokenEnv === AILY_DEFAULT_TOKEN_ENV && process.env[AILY_FALLBACK_TOKEN_ENV]) {
+    return { token: process.env[AILY_FALLBACK_TOKEN_ENV]!, source: AILY_FALLBACK_TOKEN_ENV };
+  }
+  throw new Error(
+    `Missing Aily knowledge space API token. Set ${tokenEnv}` +
+    (tokenEnv === AILY_DEFAULT_TOKEN_ENV ? ` or ${AILY_FALLBACK_TOKEN_ENV}` : '') +
+    `, then retry.`,
+  );
+}
+
+async function parseAilyResponse(
+  response: Response,
+  operation: string,
+): Promise<Record<string, unknown>> {
+  const text = await response.text();
+  let body: unknown;
+  try {
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    body = { raw: text.slice(0, 500) };
+  }
+  const objectBody = body && typeof body === 'object' ? body as Record<string, unknown> : { raw: String(body) };
+  if (!response.ok) {
+    const detail = typeof objectBody.message === 'string' ? objectBody.message : JSON.stringify(objectBody).slice(0, 300);
+    throw new Error(`Aily ${operation} failed: HTTP ${response.status} ${detail}`);
+  }
+  const statusCode = objectBody.status_code ?? objectBody.code;
+  if (statusCode !== undefined && String(statusCode) !== '0') {
+    const message = typeof objectBody.message === 'string' ? objectBody.message : JSON.stringify(objectBody).slice(0, 300);
+    throw new Error(`Aily ${operation} failed: status_code=${String(statusCode)} ${message}`);
+  }
+  return objectBody;
+}
+
+interface AilyAssetRow {
+  knowledge_asset_id?: string;
+  name?: string;
+  title?: string;
+  status?: string;
+}
+
+function ailyAssetName(asset: AilyAssetRow): string | undefined {
+  return asset.name ?? asset.title;
+}
+
+async function listAilyKnowledgeAssets(
+  opts: { host: string; knowledgeSpaceId: string; token: string; fetchImpl?: FetchLike },
+): Promise<AilyAssetRow[]> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const assets: AilyAssetRow[] = [];
+  for (let page = 1; page <= 100; page++) {
+    const url = `${opts.host}/ai/api/v1/cognate/openapi/knowledgeSpaces/${opts.knowledgeSpaceId}/knowledgeAssets?page=${page}&page_size=100`;
+    const body = await parseAilyResponse(await fetchImpl(url, {
+      method: 'GET',
+      headers: {
+        'x-api-token': opts.token,
+        'accept': 'application/json',
+      },
+    }), 'list knowledge assets');
+    const data = body.data && typeof body.data === 'object' ? body.data as Record<string, unknown> : {};
+    const pageAssets = Array.isArray(data.knowledge_assets) ? data.knowledge_assets as AilyAssetRow[] : [];
+    assets.push(...pageAssets);
+    if (data.has_more !== true || pageAssets.length === 0) break;
+  }
+  return assets;
+}
+
+async function writeAilyKnowledgeAsset(
+  opts: {
+    host: string;
+    knowledgeSpaceId: string;
+    token: string;
+    candidate: AilyPushCandidate;
+    content: string;
+    existing?: AilyAssetRow;
+    fetchImpl?: FetchLike;
+  },
+): Promise<{ id?: string; status?: string; updated: boolean }> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const payload: Record<string, string> = {
+    knowledge_space_id: opts.knowledgeSpaceId,
+    title: opts.candidate.title,
+    source_url: opts.candidate.source_url,
+    content: Buffer.from(opts.content, 'utf-8').toString('base64'),
+  };
+  const existingId = opts.existing?.knowledge_asset_id;
+  if (existingId) payload.knowledge_asset_id = existingId;
+  const path = existingId
+    ? `/ai/api/v1/cognate/openapi/knowledgeSpaces/${opts.knowledgeSpaceId}/knowledgeAssets/${existingId}/content`
+    : `/ai/api/v1/cognate/openapi/knowledgeSpaces/${opts.knowledgeSpaceId}/knowledgeAssets/content`;
+  const body = await parseAilyResponse(await fetchImpl(`${opts.host}${path}`, {
+    method: existingId ? 'PUT' : 'POST',
+    headers: {
+      'x-api-token': opts.token,
+      'content-type': 'application/json',
+      'accept': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  }), existingId ? 'update knowledge asset' : 'create knowledge asset');
+  const data = body.data && typeof body.data === 'object' ? body.data as Record<string, unknown> : {};
+  const asset = data.knowledge_asset && typeof data.knowledge_asset === 'object'
+    ? data.knowledge_asset as AilyAssetRow
+    : {};
+  return {
+    id: asset.knowledge_asset_id ?? existingId,
+    status: asset.status,
+    updated: Boolean(existingId),
+  };
+}
+
+export async function pushAilyKnowledgeSpace(opts: {
+  root: string;
+  host: string;
+  knowledgeSpaceId: string;
+  token: string;
+  sourceUrlBase?: string;
+  limit?: number;
+  replace?: boolean;
+  dryRun?: boolean;
+  fetchImpl?: FetchLike;
+}): Promise<AilyPushSpaceResult> {
+  const candidates = collectAilyPushCandidates(opts.root, {
+    limit: opts.limit,
+    sourceUrlBase: opts.sourceUrlBase,
+  });
+  const existingAssets = opts.dryRun
+    ? []
+    : await listAilyKnowledgeAssets({
+        host: opts.host,
+        knowledgeSpaceId: opts.knowledgeSpaceId,
+        token: opts.token,
+        fetchImpl: opts.fetchImpl,
+      });
+  const existingByName = new Map<string, AilyAssetRow>();
+  for (const asset of existingAssets) {
+    const name = ailyAssetName(asset);
+    if (name) existingByName.set(name, asset);
+  }
+
+  const assets: AilyPushItemResult[] = [];
+  for (const candidate of candidates) {
+    const existing = existingByName.get(candidate.title);
+    if (candidate.bytes > AILY_MAX_ASSET_BYTES) {
+      assets.push({ ...candidate, action: 'skipped_oversize', error: 'File exceeds Aily 30MB local file limit.' });
+      continue;
+    }
+    if (opts.dryRun) {
+      assets.push({
+        ...candidate,
+        action: existing
+          ? opts.replace ? 'dry_run_update' : 'dry_run_skip_existing'
+          : 'dry_run_create',
+        knowledge_asset_id: existing?.knowledge_asset_id,
+        asset_status: existing?.status,
+      });
+      continue;
+    }
+    if (existing && !opts.replace) {
+      assets.push({
+        ...candidate,
+        action: 'skipped_existing',
+        knowledge_asset_id: existing.knowledge_asset_id,
+        asset_status: existing.status,
+      });
+      continue;
+    }
+    try {
+      const content = readFileSync(candidate.path, 'utf-8');
+      const written = await writeAilyKnowledgeAsset({
+        host: opts.host,
+        knowledgeSpaceId: opts.knowledgeSpaceId,
+        token: opts.token,
+        candidate,
+        content,
+        existing,
+        fetchImpl: opts.fetchImpl,
+      });
+      assets.push({
+        ...candidate,
+        action: written.updated ? 'updated' : 'created',
+        knowledge_asset_id: written.id,
+        asset_status: written.status,
+      });
+    } catch (e) {
+      assets.push({
+        ...candidate,
+        action: 'failed',
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  const created = assets.filter((asset) => asset.action === 'created').length;
+  const updated = assets.filter((asset) => asset.action === 'updated').length;
+  const failed = assets.filter((asset) => asset.action === 'failed').length;
+  const skipped = assets.length - created - updated - failed;
+  return {
+    status: failed > 0 ? 'partial' : 'ok',
+    host: opts.host,
+    knowledge_space_id: opts.knowledgeSpaceId,
+    path: opts.root,
+    dry_run: Boolean(opts.dryRun),
+    replace: Boolean(opts.replace),
+    candidates: candidates.length,
+    created,
+    updated,
+    skipped,
+    failed,
+    assets,
+  };
+}
+
 function printStatusResult(payload: {
   status: 'ok' | 'warn';
   source: {
@@ -4091,6 +4527,61 @@ async function runStatus(engine: BrainEngine, args: string[]): Promise<void> {
   }
 
   printStatusResult(payload);
+}
+
+function printAilyPushResult(payload: AilyPushSpaceResult): void {
+  console.log(`Aily knowledge space push: ${payload.status}`);
+  console.log(`  space: ${payload.knowledge_space_id}`);
+  console.log(`  mirror: ${payload.path}`);
+  console.log(`  mode: ${payload.dry_run ? 'dry-run' : payload.replace ? 'replace' : 'create-missing'}`);
+  console.log(
+    `  assets: ${payload.candidates} candidates, ` +
+    `${payload.created} created, ${payload.updated} updated, ` +
+    `${payload.skipped} skipped, ${payload.failed} failed`,
+  );
+  for (const asset of payload.assets) {
+    const id = asset.knowledge_asset_id ? ` ${asset.knowledge_asset_id}` : '';
+    const status = asset.asset_status ? ` (${asset.asset_status})` : '';
+    console.log(`  ${asset.action}: ${asset.relative_path} -> ${asset.title}${id}${status}`);
+    if (asset.error) console.log(`    ${asset.error}`);
+  }
+}
+
+async function runAily(engine: BrainEngine, args: string[]): Promise<void> {
+  const sub = args[0];
+  if (!sub || sub === '--help' || sub === '-h' || sub === 'help') {
+    printHelp();
+    return;
+  }
+  if (sub !== 'push-space') {
+    throw new Error(`Usage: ${brand()} feishu aily push-space --space-id <knowledge_space_xxx> [--dry-run]`);
+  }
+
+  const opts = parseAilyPushSpace(args.slice(1));
+  const root = await resolveMirrorRoot(engine, opts);
+  const token = opts.dryRun
+    ? { token: '', source: '(not needed for dry-run)' }
+    : resolveAilyApiToken(opts.tokenEnv);
+  const payload = await pushAilyKnowledgeSpace({
+    root,
+    host: opts.host,
+    knowledgeSpaceId: opts.knowledgeSpaceId,
+    token: token.token,
+    sourceUrlBase: opts.sourceUrlBase,
+    limit: opts.limit,
+    replace: opts.replace,
+    dryRun: opts.dryRun,
+  });
+
+  if (opts.json) {
+    console.log(JSON.stringify(payload, null, 2));
+  } else {
+    printAilyPushResult(payload);
+    if (!opts.dryRun) {
+      console.log(`  token source: ${token.source}`);
+    }
+  }
+  if (payload.failed > 0) process.exitCode = 1;
 }
 
 async function runSetup(engine: BrainEngine, args: string[]): Promise<void> {
@@ -4282,6 +4773,11 @@ COMMANDS
   doctor [--json]
       Check lark-cli, Feishu auth health, and the rbrain-feishu schema pack.
 
+  aily push-space --space-id knowledge_space_xxx [--path DIR] [--dry-run]
+      Upload Feishu mirror markdown snapshots to an Aily knowledge space.
+      Uses ${AILY_DEFAULT_TOKEN_ENV} (or ${AILY_FALLBACK_TOKEN_ENV}) for x-api-token.
+      Existing API-created assets are skipped unless --replace is passed.
+
 EXAMPLES
   ${brand()} feishu init
   ${brand()} feishu setup --path ~/rbrain-feishu
@@ -4309,6 +4805,8 @@ EXAMPLES
   ${brand()} feishu pull im-chat-list --types group,p2p --sync
   ${brand()} feishu pull im-message-search --query "pricing" --sync
   ${brand()} feishu pull im-chat-messages --chat-id oc_xxx --sync
+  ${brand()} feishu aily push-space --space-id knowledge_space_xxx --dry-run
+  ${AILY_DEFAULT_TOKEN_ENV}=... ${brand()} feishu aily push-space --space-id knowledge_space_xxx
   ${brand()} feishu doctor
 `);
 }
@@ -4353,6 +4851,13 @@ export async function runFeishu(args: string[], ctx: FeishuContext = {}): Promis
       throw new Error(`${brand()} feishu status requires an initialized local RBrain database. Run ${brand()} init first.`);
     }
     await runStatus(ctx.engine, args.slice(1));
+    return;
+  }
+  if (sub === 'aily') {
+    if (!ctx.engine) {
+      throw new Error(`${brand()} feishu aily requires an initialized local RBrain database. Run ${brand()} init first.`);
+    }
+    await runAily(ctx.engine, args.slice(1));
     return;
   }
   if (sub === 'doctor') {
