@@ -32,6 +32,7 @@ const AILY_FALLBACK_TOKEN_ENV = 'AILY_KNOWLEDGE_SPACE_API_TOKEN';
 const AILY_DEFAULT_SPACE_ID_ENV = 'RBRAIN_AILY_KNOWLEDGE_SPACE_ID';
 const AILY_FALLBACK_SPACE_ID_ENV = 'AILY_KNOWLEDGE_SPACE_ID';
 const AILY_MAX_ASSET_BYTES = 30 * 1024 * 1024;
+const AILY_OVERVIEW_RELATIVE_PATH = 'feishu/rbrain-feishu-overview.md';
 
 export const FEISHU_DOCTOR_CAPABILITY_CHECKS = [
   { id: 'collector:calendar-agenda', argv: ['lark-cli', 'calendar', '+agenda', '--help'] },
@@ -4219,6 +4220,55 @@ export function buildAilyAssetTitle(relativePath: string): string {
   return `rbrain-feishu-${safe || 'snapshot'}-${hash}.txt`;
 }
 
+export function buildAilyOverviewMarkdown(): string {
+  return [
+    '# RBrain Feishu Mirror Overview',
+    '',
+    'This generated note is a concise retrieval target for Aily. Prefer it over raw collector JSON when answering how rbrain-feishu works.',
+    '',
+    '中文检索关键词：rbrain-feishu 是怎么同步飞书云文档和知识空间的；飞书云文档同步；飞书知识空间同步；Aily 知识库；rbrain feishu aily push-space。',
+    '',
+    '简短回答：rbrain-feishu 先用 lark-cli 把飞书云文档、Wiki、Drive 搜索结果等数据拉成本地 Markdown 镜像，再用 `rbrain feishu refresh` 同步到本地 RBrain 数据库；如果要让 Aily 自定义智能体消费，则用 `rbrain feishu aily push-space` 把这些 Markdown 快照上传为 Aily 知识空间资产，后续由 Aily 负责 embedding、检索和飞书聊天回复。',
+    '',
+    '## What rbrain-feishu does',
+    '',
+    '- `rbrain feishu setup --path ~/rbrain-feishu` creates a local Feishu mirror, starter collector scripts, and registers the mirror as an RBrain source using the `rbrain-feishu` schema pack.',
+    '- `rbrain feishu pull ...` collectors call `lark-cli` with the current Feishu user or bot identity and save snapshots as Markdown under `feishu/`.',
+    '- `rbrain feishu refresh` runs the daily collectors, usually agenda and incomplete tasks, plus optional Drive, Wiki, Mail, Minutes, Base, IM, Approval, and OKR collectors, then syncs the mirror into the local RBrain database.',
+    '- Each snapshot uses YAML frontmatter for routing metadata, followed by the captured JSON or document content.',
+    '',
+    '## How Feishu cloud documents are mirrored',
+    '',
+    '- Discovery can use `lark-cli drive +search --format json` for Drive/Wiki/Docx search results.',
+    '- Direct document capture can use `rbrain feishu pull doc <url-or-token> <slug>` or `rbrain feishu pull docs-list --file <manifest.tsv>`.',
+    '- Wiki discovery can use `lark-cli wiki +space-list --format json` and `lark-cli wiki +node-list ...` through the rbrain Feishu pull commands.',
+    '- The mirror stores these captures as deterministic Markdown files such as `feishu/drive/*.md`, `feishu/wiki/*.md`, and `feishu/docs/*.md`.',
+    '',
+    '## How Aily knowledge space sync works',
+    '',
+    '- `rbrain feishu aily push-space --space-id knowledge_space_xxx` uploads mirror Markdown snapshots to an Aily Knowledge Space.',
+    '- The command uses the Knowledge Space API with `x-api-token` from `RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN` or `AILY_KNOWLEDGE_SPACE_API_TOKEN`.',
+    '- The knowledge space id can come from `--space-id`, `RBRAIN_AILY_KNOWLEDGE_SPACE_ID`, or `AILY_KNOWLEDGE_SPACE_ID`.',
+    '- For each Markdown snapshot, rbrain creates a deterministic `.txt` knowledge asset title from the relative path and a short hash.',
+    '- The uploaded payload includes `knowledge_space_id`, `title`, `source_url`, and base64-encoded UTF-8 content.',
+    '- Existing API-created assets with the same title are skipped by default; pass `--replace` to update them.',
+    '- The generated asset `rbrain-feishu-overview` is intentionally concise so Aily can answer setup/sync questions without loading noisy raw JSON captures.',
+    '',
+    '## Responsibility boundary',
+    '',
+    '- RBrain handles collection, local mirror files, local RBrain sync, and ingestion into Aily Knowledge Space.',
+    '- Aily handles embedding, retrieval, model generation, and Feishu channel replies.',
+    '- The Knowledge Space API is a management API for assets; it is not the runtime ask/search API for end users.',
+    '- In Feishu chat, the Aily custom agent should consume the connected knowledge space through Enterprise Knowledge or Custom Knowledge retrieval.',
+    '',
+    '## Secret handling',
+    '',
+    '- Put real Aily tokens in `.env` or the shell environment, not in committed files.',
+    '- The generated mirror `.gitignore` ignores `.env` so API tokens and app secrets stay local.',
+    '',
+  ].join('\n');
+}
+
 function collectMarkdownPaths(dir: string): string[] {
   if (!existsSync(dir)) return [];
   const out: string[] = [];
@@ -4242,8 +4292,17 @@ export function collectAilyPushCandidates(
   const sourceUrlBase = opts.sourceUrlBase ?? AILY_DEFAULT_SOURCE_URL_BASE;
   const files = collectMarkdownPaths(feishuRoot)
     .sort((a, b) => a.localeCompare(b))
-    .slice(0, opts.limit);
-  return files.map((path) => {
+    .filter((path) => relative(root, path).replace(/\\/g, '/') !== AILY_OVERVIEW_RELATIVE_PATH);
+  const overviewContent = buildAilyOverviewMarkdown();
+  const overviewCandidate: AilyPushCandidate = {
+    path: join(root, AILY_OVERVIEW_RELATIVE_PATH),
+    relative_path: AILY_OVERVIEW_RELATIVE_PATH,
+    title: buildAilyAssetTitle(AILY_OVERVIEW_RELATIVE_PATH),
+    source_url: `${sourceUrlBase}/${encodePathForUrl(AILY_OVERVIEW_RELATIVE_PATH)}`,
+    bytes: Buffer.byteLength(overviewContent, 'utf-8'),
+    content_sha256: createHash('sha256').update(overviewContent).digest('hex'),
+  };
+  const candidates = [overviewCandidate, ...files.map((path) => {
     const content = readFileSync(path, 'utf-8');
     const relativePath = relative(root, path).replace(/\\/g, '/');
     return {
@@ -4254,7 +4313,15 @@ export function collectAilyPushCandidates(
       bytes: statSync(path).size,
       content_sha256: createHash('sha256').update(content).digest('hex'),
     };
-  });
+  })];
+  return opts.limit ? candidates.slice(0, opts.limit) : candidates;
+}
+
+function readAilyCandidateContent(candidate: AilyPushCandidate): string {
+  if (candidate.relative_path === AILY_OVERVIEW_RELATIVE_PATH) {
+    return buildAilyOverviewMarkdown();
+  }
+  return readFileSync(candidate.path, 'utf-8');
 }
 
 function resolveAilyApiToken(tokenEnv: string, env: EnvLookup = process.env): { token: string; source: string } {
@@ -4427,7 +4494,7 @@ export async function pushAilyKnowledgeSpace(opts: {
       continue;
     }
     try {
-      const content = readFileSync(candidate.path, 'utf-8');
+      const content = readAilyCandidateContent(candidate);
       const written = await writeAilyKnowledgeAsset({
         host: opts.host,
         knowledgeSpaceId: opts.knowledgeSpaceId,

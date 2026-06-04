@@ -9,6 +9,7 @@ import {
   FEISHU_MIRROR_DIRS,
   buildAilyEnvExample,
   buildAilyAssetTitle,
+  buildAilyOverviewMarkdown,
   buildApprovalInitiatedMarkdown,
   buildApprovalInitiatedScript,
   buildApprovalTasksMarkdown,
@@ -351,12 +352,18 @@ describe('rbrain feishu command helpers', () => {
     ].join('\n'), 'utf-8');
 
     const candidates = collectAilyPushCandidates(root);
-    expect(candidates).toHaveLength(1);
-    expect(candidates[0]!.relative_path).toBe('feishu/docs/roadmap.md');
-    expect(candidates[0]!.title).toBe(buildAilyAssetTitle('feishu/docs/roadmap.md'));
+    expect(candidates).toHaveLength(2);
+    expect(candidates[0]!.relative_path).toBe('feishu/rbrain-feishu-overview.md');
+    expect(candidates[0]!.title).toBe(buildAilyAssetTitle('feishu/rbrain-feishu-overview.md'));
     expect(candidates[0]!.title).toMatch(/\.txt$/);
-    expect(candidates[0]!.source_url).toBe('https://example.feishu.cn/docx/abc');
+    expect(candidates[0]!.source_url).toBe('https://rbrain.local/feishu-mirror/feishu/rbrain-feishu-overview.md');
     expect(candidates[0]!.content_sha256).toHaveLength(64);
+    expect(candidates[0]!.bytes).toBe(Buffer.byteLength(buildAilyOverviewMarkdown(), 'utf-8'));
+    expect(candidates[1]!.relative_path).toBe('feishu/docs/roadmap.md');
+    expect(candidates[1]!.title).toBe(buildAilyAssetTitle('feishu/docs/roadmap.md'));
+    expect(candidates[1]!.title).toMatch(/\.txt$/);
+    expect(candidates[1]!.source_url).toBe('https://example.feishu.cn/docx/abc');
+    expect(candidates[1]!.content_sha256).toHaveLength(64);
   });
 
   test('Aily push creates missing assets without leaking the API token', async () => {
@@ -389,15 +396,18 @@ describe('rbrain feishu command helpers', () => {
       fetchImpl: fakeFetch,
     });
 
-    expect(result.created).toBe(1);
+    expect(result.created).toBe(2);
     expect(result.failed).toBe(0);
     expect(JSON.stringify(result)).not.toContain('secret-token');
-    const post = calls.find((call) => call.init.method === 'POST');
-    expect(post).toBeTruthy();
-    expect((post!.init.headers as Record<string, string>)['x-api-token']).toBe('secret-token');
-    expect(post!.body?.knowledge_space_id).toBe('knowledge_space_test');
-    expect(String(post!.body?.title)).toMatch(/\.txt$/);
-    expect(Buffer.from(String(post!.body?.content), 'base64').toString('utf-8')).toContain('Daily agenda');
+    const posts = calls.filter((call) => call.init.method === 'POST');
+    expect(posts).toHaveLength(2);
+    expect((posts[0]!.init.headers as Record<string, string>)['x-api-token']).toBe('secret-token');
+    expect(posts[0]!.body?.knowledge_space_id).toBe('knowledge_space_test');
+    expect(String(posts[0]!.body?.title)).toMatch(/\.txt$/);
+    const uploadedBodies = posts.map((post) => Buffer.from(String(post.body?.content), 'base64').toString('utf-8'));
+    expect(uploadedBodies.some((body) => body.includes('RBrain Feishu Mirror Overview'))).toBe(true);
+    expect(uploadedBodies.some((body) => body.includes('rbrain feishu aily push-space'))).toBe(true);
+    expect(uploadedBodies.some((body) => body.includes('Daily agenda'))).toBe(true);
   });
 
   test('Aily push skips existing assets unless replace is requested', async () => {
@@ -406,6 +416,7 @@ describe('rbrain feishu command helpers', () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'my-tasks-2026-06-04.md'), '# Tasks\n', 'utf-8');
     const title = buildAilyAssetTitle('feishu/tasks/my-tasks-2026-06-04.md');
+    const overviewTitle = buildAilyAssetTitle('feishu/rbrain-feishu-overview.md');
 
     const calls: Array<{ method?: string }> = [];
     const fakeFetch = async (_url: string, init?: RequestInit): Promise<Response> => {
@@ -413,9 +424,12 @@ describe('rbrain feishu command helpers', () => {
       return new Response(JSON.stringify({
         status_code: '0',
         data: {
-          knowledge_assets: [{ name: title, knowledge_asset_id: 'knowledge_asset_existing', status: 'successful' }],
+          knowledge_assets: [
+            { name: overviewTitle, knowledge_asset_id: 'knowledge_asset_overview', status: 'successful' },
+            { name: title, knowledge_asset_id: 'knowledge_asset_existing', status: 'successful' },
+          ],
           has_more: false,
-          total: 1,
+          total: 2,
         },
       }), { status: 200 });
     };
@@ -429,7 +443,7 @@ describe('rbrain feishu command helpers', () => {
     });
 
     expect(result.created).toBe(0);
-    expect(result.skipped).toBe(1);
+    expect(result.skipped).toBe(2);
     expect(result.assets[0]!.action).toBe('skipped_existing');
     expect(calls.map((call) => call.method)).toEqual(['GET']);
   });
