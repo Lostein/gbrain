@@ -123,6 +123,11 @@ The command reads `.env` from the current directory, the Feishu mirror root, or
 an explicit `--env-file`. Real `.env` files are ignored by Git; only
 `.env.*.example` templates should be committed.
 
+For the proposed Feishu-native managed architecture, where Aily Knowledge Space
+is the runtime knowledge backend, Miaoda hosts the online control plane, and
+local RBrain becomes optional developer tooling, see
+[`feishu-native-architecture.md`](./feishu-native-architecture.md).
+
 ## Schema Pack
 
 `rbrain-feishu` extends `gbrain-base-v2` with Feishu-native page types:
