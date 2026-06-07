@@ -194,11 +194,14 @@ The local adapter:
   `RBRAIN_FEISHU_MANAGED_DATABASE_URL`
 - adds `rbrain feishu managed status` so JSON or Postgres registry state can be
   inspected before a full Aily push
+- extracts `runManagedSyncJob` so a Miaoda/server-function trigger can reuse
+  the same sync implementation instead of shelling out to the CLI
 
 It is intentionally not the final managed backend. The sync path now talks to a
 registry store boundary, and both the default JSON store and the Postgres store
 implement that boundary. The next slice should run the Postgres store against
-the real Serverless PG / Miaoda table layer and add the scheduled trigger.
+the real Serverless PG / Miaoda table layer and add the scheduled trigger around
+`runManagedSyncJob`.
 
 ## Acceptance Criteria
 
@@ -223,6 +226,7 @@ Local tests:
 - Aily create/update/skip mocked responses
 - Base mirror mocked responses
 - managed status JSON output for registry counts and latest run
+- direct `runManagedSyncJob` invocation without the CLI dispatcher
 
 Manual platform checks:
 

@@ -260,7 +260,7 @@ interface StatusOpts {
   json: boolean;
 }
 
-interface AilyPushSpaceOpts {
+export interface AilyPushSpaceOpts {
   path?: string;
   sourceId: string;
   host: string;
@@ -274,7 +274,7 @@ interface AilyPushSpaceOpts {
   json: boolean;
 }
 
-interface ManagedSyncOpts extends AilyPushSpaceOpts {
+export interface ManagedSyncOpts extends AilyPushSpaceOpts {
   registryPath?: string;
   registryStore: ManagedRegistryStoreKind;
   registryUrl?: string;
@@ -305,7 +305,7 @@ interface ManagedBaseProvisionOpts {
   json: boolean;
 }
 
-type ManagedRegistryStoreKind = 'json' | 'postgres';
+export type ManagedRegistryStoreKind = 'json' | 'postgres';
 
 interface FeishuContext {
   engine?: BrainEngine;
@@ -430,7 +430,7 @@ export interface AilyPushSpaceResult {
 }
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
-type EnvLookup = Record<string, string | undefined>;
+export type EnvLookup = Record<string, string | undefined>;
 
 function brand(): string {
   return process.env.RBRAIN_MODE === '1' ? 'rbrain' : 'gbrain';
@@ -916,7 +916,7 @@ function parseManagedBaseProvision(args: string[]): ManagedBaseProvisionOpts {
   };
 }
 
-interface ManagedRegistryStoreConfig {
+export interface ManagedRegistryStoreConfig {
   kind: ManagedRegistryStoreKind;
   registryPath: string;
   location: string;
@@ -924,13 +924,13 @@ interface ManagedRegistryStoreConfig {
   ensureSchema: boolean;
 }
 
-interface ManagedRegistryStoreHandle {
+export interface ManagedRegistryStoreHandle {
   store: ManagedRegistryStore;
   close?: () => Promise<void>;
 }
 
-type ManagedPostgresSqlClient = ManagedRegistrySqlClient & { end?: () => Promise<unknown> };
-type ManagedPostgresFactory = (url: string) => ManagedPostgresSqlClient;
+export type ManagedPostgresSqlClient = ManagedRegistrySqlClient & { end?: () => Promise<unknown> };
+export type ManagedPostgresFactory = (url: string) => ManagedPostgresSqlClient;
 
 export function resolveManagedRegistryStoreConfig(opts: {
   kind: ManagedRegistryStoreKind;
@@ -5233,6 +5233,152 @@ function mirrorManagedBaseRows(opts: {
   };
 }
 
+type ManagedBaseMirrorRowsImpl = typeof mirrorManagedBaseRows;
+
+export interface ManagedSyncJobInput {
+  root: string;
+  opts: ManagedSyncOpts;
+  env: EnvLookup;
+  storeConfig?: ManagedRegistryStoreConfig;
+  createStoreHandle?: typeof createManagedRegistryStoreHandle;
+  mirrorBaseRows?: ManagedBaseMirrorRowsImpl;
+}
+
+export async function runManagedSyncJob(input: ManagedSyncJobInput) {
+  const storeConfig = input.storeConfig ?? resolveManagedRegistryStoreConfig({
+    kind: input.opts.registryStore,
+    root: input.root,
+    registryPath: input.opts.registryPath,
+    registryUrl: input.opts.registryUrl,
+    ensureSchema: input.opts.registryEnsureSchema,
+  });
+  const registryPath = storeConfig.location;
+  const createStoreHandle = input.createStoreHandle ?? createManagedRegistryStoreHandle;
+  const registryHandle = await createStoreHandle(storeConfig);
+  const registryStore = registryHandle.store;
+  try {
+    const registry = await registryStore.load();
+    const candidates = collectAilyPushCandidates(input.root, {
+      limit: input.opts.limit,
+      sourceUrlBase: input.opts.sourceUrlBase,
+    });
+    const previousByTitle = new Map(registry.assets.map((asset) => [asset.aily_asset_title, asset]));
+    const unchanged = new Map<string, AilyPushItemResult>();
+    const pushCandidates: AilyPushCandidate[] = [];
+    const knownExisting = registryAilyAssets(registry);
+    const startedAt = new Date().toISOString();
+
+    for (const candidate of candidates) {
+      const previous = previousByTitle.get(candidate.title);
+      const sameHash = previous?.content_sha256 === candidate.content_sha256;
+      if (sameHash && previous?.aily_asset_id && !input.opts.replace) {
+        unchanged.set(candidate.relative_path, {
+          ...candidate,
+          action: input.opts.dryRun ? 'dry_run_skip_existing' : 'skipped_existing',
+          knowledge_asset_id: previous.aily_asset_id,
+          asset_status: previous.aily_status ?? undefined,
+        });
+      } else {
+        pushCandidates.push(candidate);
+      }
+    }
+
+    const token = input.opts.dryRun || pushCandidates.length === 0
+      ? { token: '', source: '(not needed)' }
+      : resolveAilyApiToken(input.opts.tokenEnv, input.env);
+    const pushed = pushCandidates.length === 0
+      ? summarizeAilyPushAssets({
+          root: input.root,
+          host: input.opts.host,
+          knowledgeSpaceId: input.opts.knowledgeSpaceId,
+          dryRun: input.opts.dryRun,
+          replace: input.opts.replace,
+          assets: [],
+        })
+      : await pushAilyKnowledgeSpace({
+          root: input.root,
+          host: input.opts.host,
+          knowledgeSpaceId: input.opts.knowledgeSpaceId,
+          token: token.token,
+          sourceUrlBase: input.opts.sourceUrlBase,
+          replace: true,
+          dryRun: input.opts.dryRun,
+          candidates: pushCandidates,
+          dryRunExistingAssets: Array.from(knownExisting.values()),
+        });
+    const pushedByPath = new Map(pushed.assets.map((asset) => [asset.relative_path, asset]));
+    const assets = candidates.map((candidate) => {
+      const existing = unchanged.get(candidate.relative_path);
+      if (existing) return existing;
+      const pushedAsset = pushedByPath.get(candidate.relative_path);
+      if (!pushedAsset) {
+        return {
+          ...candidate,
+          action: 'failed' as const,
+          error: 'Candidate was not returned by managed Aily push.',
+        };
+      }
+      return pushedAsset;
+    });
+    const combinedPush = summarizeAilyPushAssets({
+      root: input.root,
+      host: input.opts.host,
+      knowledgeSpaceId: input.opts.knowledgeSpaceId,
+      dryRun: input.opts.dryRun,
+      replace: input.opts.replace,
+      assets,
+    });
+
+    const finishedAt = new Date().toISOString();
+    const record = recordManagedSyncResult(input.opts.dryRun ? cloneManagedRegistry(registry) : registry, {
+      source: {
+        id: input.opts.sourceId,
+        kind: input.opts.sourceKind,
+        name: input.opts.sourceName,
+        config_json: {
+          mirror_path: input.root,
+          registry_path: registryPath,
+          registry_store: storeConfig.kind,
+          aily_host: input.opts.host,
+          aily_knowledge_space_id: input.opts.knowledgeSpaceId,
+          source_url_base: input.opts.sourceUrlBase,
+        },
+      },
+      trigger: input.opts.trigger,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      assets: assets.map(managedObservationFromAilyAsset),
+    });
+    if (!input.opts.dryRun) await registryStore.save(record.snapshot);
+    const baseRows = buildManagedBaseMirrorRows(record.snapshot);
+    const mirrorBaseRows = input.mirrorBaseRows ?? mirrorManagedBaseRows;
+    const baseWrite = mirrorBaseRows({
+      rows: baseRows,
+      baseToken: input.opts.baseToken,
+      tableId: input.opts.baseTableId,
+      as: input.opts.baseAs,
+      dryRun: input.opts.dryRun,
+    });
+    const payload = buildManagedSyncPayload({
+      registryPath,
+      registryStore,
+      persisted: !input.opts.dryRun,
+      syncRun: record.sync_run,
+      push: combinedPush,
+      baseRows,
+      baseWrite,
+    });
+
+    return {
+      payload,
+      tokenSource: token.source,
+      pushCandidates: pushCandidates.length,
+    };
+  } finally {
+    await registryHandle.close?.();
+  }
+}
+
 async function runManaged(engine: BrainEngine | undefined, args: string[]): Promise<void> {
   const sub = args[0];
   if (!sub || sub === '--help' || sub === '-h' || sub === 'help') {
@@ -5310,131 +5456,20 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     registryUrl: opts.registryUrl,
     ensureSchema: opts.registryEnsureSchema,
   });
-  const registryPath = storeConfig.location;
-  const registryHandle = await createManagedRegistryStoreHandle(storeConfig);
-  const registryStore = registryHandle.store;
-  try {
-  const registry = await registryStore.load();
-  const candidates = collectAilyPushCandidates(root, {
-    limit: opts.limit,
-    sourceUrlBase: opts.sourceUrlBase,
-  });
-  const previousByTitle = new Map(registry.assets.map((asset) => [asset.aily_asset_title, asset]));
-  const unchanged = new Map<string, AilyPushItemResult>();
-  const pushCandidates: AilyPushCandidate[] = [];
-  const knownExisting = registryAilyAssets(registry);
-  const startedAt = new Date().toISOString();
-
-  for (const candidate of candidates) {
-    const previous = previousByTitle.get(candidate.title);
-    const sameHash = previous?.content_sha256 === candidate.content_sha256;
-    if (sameHash && previous?.aily_asset_id && !opts.replace) {
-      unchanged.set(candidate.relative_path, {
-        ...candidate,
-        action: opts.dryRun ? 'dry_run_skip_existing' : 'skipped_existing',
-        knowledge_asset_id: previous.aily_asset_id,
-        asset_status: previous.aily_status ?? undefined,
-      });
-    } else {
-      pushCandidates.push(candidate);
-    }
-  }
-
-  const token = opts.dryRun || pushCandidates.length === 0
-    ? { token: '', source: '(not needed)' }
-    : resolveAilyApiToken(opts.tokenEnv, env);
-  const pushed = pushCandidates.length === 0
-    ? summarizeAilyPushAssets({
-        root,
-        host: opts.host,
-        knowledgeSpaceId: opts.knowledgeSpaceId,
-        dryRun: opts.dryRun,
-        replace: opts.replace,
-        assets: [],
-      })
-    : await pushAilyKnowledgeSpace({
-        root,
-        host: opts.host,
-        knowledgeSpaceId: opts.knowledgeSpaceId,
-        token: token.token,
-        sourceUrlBase: opts.sourceUrlBase,
-        replace: true,
-        dryRun: opts.dryRun,
-        candidates: pushCandidates,
-        dryRunExistingAssets: Array.from(knownExisting.values()),
-      });
-  const pushedByPath = new Map(pushed.assets.map((asset) => [asset.relative_path, asset]));
-  const assets = candidates.map((candidate) => {
-    const existing = unchanged.get(candidate.relative_path);
-    if (existing) return existing;
-    const pushedAsset = pushedByPath.get(candidate.relative_path);
-    if (!pushedAsset) {
-      return {
-        ...candidate,
-        action: 'failed' as const,
-        error: 'Candidate was not returned by managed Aily push.',
-      };
-    }
-    return pushedAsset;
-  });
-  const combinedPush = summarizeAilyPushAssets({
+  const job = await runManagedSyncJob({
     root,
-    host: opts.host,
-    knowledgeSpaceId: opts.knowledgeSpaceId,
-    dryRun: opts.dryRun,
-    replace: opts.replace,
-    assets,
-  });
-
-  const finishedAt = new Date().toISOString();
-  const record = recordManagedSyncResult(opts.dryRun ? cloneManagedRegistry(registry) : registry, {
-    source: {
-      id: opts.sourceId,
-      kind: opts.sourceKind,
-      name: opts.sourceName,
-      config_json: {
-        mirror_path: root,
-        registry_path: registryPath,
-        registry_store: storeConfig.kind,
-        aily_host: opts.host,
-        aily_knowledge_space_id: opts.knowledgeSpaceId,
-        source_url_base: opts.sourceUrlBase,
-      },
-    },
-    trigger: opts.trigger,
-    started_at: startedAt,
-    finished_at: finishedAt,
-    assets: assets.map(managedObservationFromAilyAsset),
-  });
-  if (!opts.dryRun) await registryStore.save(record.snapshot);
-  const baseRows = buildManagedBaseMirrorRows(record.snapshot);
-  const baseWrite = mirrorManagedBaseRows({
-    rows: baseRows,
-    baseToken: opts.baseToken,
-    tableId: opts.baseTableId,
-    as: opts.baseAs,
-    dryRun: opts.dryRun,
-  });
-  const payload = buildManagedSyncPayload({
-    registryPath,
-    registryStore,
-    persisted: !opts.dryRun,
-    syncRun: record.sync_run,
-    push: combinedPush,
-    baseRows,
-    baseWrite,
+    opts,
+    env,
+    storeConfig,
   });
 
   if (opts.json) {
-    console.log(JSON.stringify(payload, null, 2));
+    console.log(JSON.stringify(job.payload, null, 2));
   } else {
-    printManagedSyncResult(payload);
-    if (!opts.dryRun && pushCandidates.length > 0) console.log(`  token source: ${token.source}`);
+    printManagedSyncResult(job.payload);
+    if (!opts.dryRun && job.pushCandidates > 0) console.log(`  token source: ${job.tokenSource}`);
   }
-  if (combinedPush.failed > 0 || baseWrite.failed > 0) process.exitCode = 1;
-  } finally {
-    await registryHandle.close?.();
-  }
+  if (job.payload.aily.failed > 0 || job.payload.base_mirror.failed > 0) process.exitCode = 1;
 }
 
 function printStatusResult(payload: {

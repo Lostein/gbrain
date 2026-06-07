@@ -67,6 +67,7 @@ import {
   parseDocManifest,
   pushAilyKnowledgeSpace,
   resolveManagedRegistryStoreConfig,
+  runManagedSyncJob,
 } from '../src/commands/feishu.ts';
 
 const cleanupPaths: string[] = [];
@@ -494,6 +495,41 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.aily.assets[0]!.relative_path).toBe('feishu/rbrain-feishu-overview.md');
     expect(payload.base_mirror.rows).toBe(2);
     expect(existsSync(payload.registry_path)).toBe(false);
+  });
+
+  test('managed sync job can run without the CLI dispatcher', async () => {
+    const root = makeTempDir('rbrain-feishu-managed-job-');
+    const dir = join(root, 'feishu', 'docs');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'roadmap.md'), '# Roadmap\n\nPlanning notes.\n', 'utf-8');
+
+    const job = await runManagedSyncJob({
+      root,
+      env: {},
+      opts: {
+        path: root,
+        sourceId: 'feishu',
+        host: 'https://apaas.feishu.cn',
+        knowledgeSpaceId: 'knowledge_space_test',
+        tokenEnv: 'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN',
+        sourceUrlBase: 'https://rbrain.local/feishu-mirror',
+        replace: false,
+        dryRun: true,
+        json: true,
+        registryStore: 'json',
+        registryEnsureSchema: false,
+        trigger: 'manual',
+        sourceKind: 'manual',
+        sourceName: 'Feishu',
+      },
+    });
+
+    expect(job.payload.status).toBe('ok');
+    expect(job.payload.registry_store.kind).toBe('json');
+    expect(job.payload.sync_run.assets_seen).toBe(2);
+    expect(job.payload.aily.assets.map((asset) => asset.action)).toEqual(['dry_run_create', 'dry_run_create']);
+    expect(job.tokenSource).toBe('(not needed)');
+    expect(existsSync(defaultManagedRegistryPath(root))).toBe(false);
   });
 
   test('managed registry store config defaults to JSON and redacts Postgres URLs', async () => {
