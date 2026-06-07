@@ -68,6 +68,7 @@ import {
   pushAilyKnowledgeSpace,
   resolveManagedRegistryStoreConfig,
   runManagedSyncJob,
+  runManagedTrigger,
 } from '../src/commands/feishu.ts';
 
 const cleanupPaths: string[] = [];
@@ -529,6 +530,75 @@ describe('rbrain feishu command helpers', () => {
     expect(job.payload.sync_run.assets_seen).toBe(2);
     expect(job.payload.aily.assets.map((asset) => asset.action)).toEqual(['dry_run_create', 'dry_run_create']);
     expect(job.tokenSource).toBe('(not needed)');
+    expect(existsSync(defaultManagedRegistryPath(root))).toBe(false);
+  });
+
+  test('managed trigger can inspect registry status for a server function', async () => {
+    const root = makeTempDir('rbrain-feishu-managed-trigger-status-');
+    const seed = recordManagedSyncResult(createEmptyManagedRegistry('2026-06-07T10:00:00.000Z'), {
+      source: { id: 'feishu', kind: 'manual', name: 'Feishu' },
+      trigger: 'api',
+      started_at: '2026-06-07T10:00:00.000Z',
+      finished_at: '2026-06-07T10:00:01.000Z',
+      assets: [{
+        source_uri: 'feishu/docs/roadmap.md',
+        title: 'feishu/docs/roadmap.md',
+        content_sha256: 'f'.repeat(64),
+        normalized_text_uri: 'feishu/docs/roadmap.md',
+        aily_asset_title: 'rbrain-feishu-roadmap.txt',
+        aily_asset_id: 'knowledge_asset_1',
+        aily_status: 'successful',
+        action: 'created',
+      }],
+    });
+    saveManagedRegistry(defaultManagedRegistryPath(root), seed.snapshot);
+
+    const result = await runManagedTrigger({
+      request: {
+        action: 'status',
+        root,
+      },
+      env: {},
+    });
+
+    const statusPayload = result.result as {
+      counts: { assets: number };
+      latest_sync_run: { id: string } | null;
+    };
+    expect(result.action).toBe('status');
+    expect(result.status).toBe('ok');
+    expect(statusPayload.counts.assets).toBe(1);
+    expect(statusPayload.latest_sync_run?.id).toBe(seed.sync_run.id);
+  });
+
+  test('managed trigger can run dry-run sync for a server function', async () => {
+    const root = makeTempDir('rbrain-feishu-managed-trigger-sync-');
+    const dir = join(root, 'feishu', 'docs');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'roadmap.md'), '# Roadmap\n\nPlanning notes.\n', 'utf-8');
+
+    const result = await runManagedTrigger({
+      request: {
+        action: 'sync',
+        root,
+        trigger: 'api',
+        aily: {
+          knowledgeSpaceId: 'knowledge_space_test',
+          dryRun: true,
+        },
+      },
+      env: {},
+    });
+
+    const syncPayload = result.result as {
+      sync_run: { trigger: string; assets_seen: number };
+      aily: { assets: Array<{ action: string }> };
+    };
+    expect(result.action).toBe('sync');
+    expect(result.status).toBe('ok');
+    expect(syncPayload.sync_run.trigger).toBe('api');
+    expect(syncPayload.sync_run.assets_seen).toBe(2);
+    expect(syncPayload.aily.assets.map((asset) => asset.action)).toEqual(['dry_run_create', 'dry_run_create']);
     expect(existsSync(defaultManagedRegistryPath(root))).toBe(false);
   });
 

@@ -287,7 +287,7 @@ export interface ManagedSyncOpts extends AilyPushSpaceOpts {
   baseAs?: string;
 }
 
-interface ManagedRegistryStatusOpts {
+export interface ManagedRegistryStatusOpts {
   path?: string;
   sourceId: string;
   registryPath?: string;
@@ -4965,6 +4965,35 @@ function printManagedRegistryStatusResult(payload: ReturnType<typeof buildManage
   console.log(`  Base preview rows: ${payload.counts.base_mirror_rows}`);
 }
 
+export interface ManagedRegistryStatusJobInput {
+  root: string;
+  opts: ManagedRegistryStatusOpts;
+  storeConfig?: ManagedRegistryStoreConfig;
+  createStoreHandle?: typeof createManagedRegistryStoreHandle;
+}
+
+export async function runManagedRegistryStatusJob(input: ManagedRegistryStatusJobInput) {
+  const storeConfig = input.storeConfig ?? resolveManagedRegistryStoreConfig({
+    kind: input.opts.registryStore,
+    root: input.root,
+    registryPath: input.opts.registryPath,
+    registryUrl: input.opts.registryUrl,
+    ensureSchema: input.opts.registryEnsureSchema,
+  });
+  const createStoreHandle = input.createStoreHandle ?? createManagedRegistryStoreHandle;
+  const registryHandle = await createStoreHandle(storeConfig);
+  try {
+    const snapshot = await registryHandle.store.load();
+    return buildManagedRegistryStatusPayload({
+      snapshot,
+      registryStore: registryHandle.store,
+      schemaEnsured: storeConfig.ensureSchema,
+    });
+  } finally {
+    await registryHandle.close?.();
+  }
+}
+
 interface ManagedBaseMirrorWriteResult {
   status: 'preview' | 'ok' | 'partial';
   configured: boolean;
@@ -5379,6 +5408,138 @@ export async function runManagedSyncJob(input: ManagedSyncJobInput) {
   }
 }
 
+export type ManagedTriggerAction = 'status' | 'sync';
+
+export interface ManagedTriggerRequest {
+  action?: ManagedTriggerAction;
+  root?: string;
+  sourceId?: string;
+  trigger?: string;
+  registry?: {
+    store?: ManagedRegistryStoreKind;
+    path?: string;
+    url?: string;
+    ensureSchema?: boolean;
+  };
+  aily?: {
+    host?: string;
+    knowledgeSpaceId?: string;
+    tokenEnv?: string;
+    sourceUrlBase?: string;
+    limit?: number;
+    replace?: boolean;
+    dryRun?: boolean;
+  };
+  source?: {
+    kind?: ManagedSourceKind;
+    name?: string;
+  };
+  base?: {
+    token?: string;
+    tableId?: string;
+    as?: string;
+  };
+}
+
+export interface ManagedTriggerInput {
+  request?: ManagedTriggerRequest;
+  env?: EnvLookup;
+  createStoreHandle?: typeof createManagedRegistryStoreHandle;
+  mirrorBaseRows?: ManagedBaseMirrorRowsImpl;
+}
+
+function resolveManagedTriggerRegistry(opts: {
+  request?: ManagedTriggerRequest;
+  env: EnvLookup;
+}): Pick<ManagedRegistryStatusOpts, 'registryPath' | 'registryStore' | 'registryUrl' | 'registryEnsureSchema'> {
+  const registryUrl = opts.request?.registry?.url ?? opts.env[MANAGED_REGISTRY_DATABASE_URL_ENV];
+  return {
+    registryPath: opts.request?.registry?.path,
+    registryStore: opts.request?.registry?.store ?? (registryUrl ? 'postgres' : 'json'),
+    registryUrl,
+    registryEnsureSchema: Boolean(opts.request?.registry?.ensureSchema),
+  };
+}
+
+function resolveManagedTriggerRoot(opts: {
+  action: ManagedTriggerAction;
+  request?: ManagedTriggerRequest;
+  registryStore: ManagedRegistryStoreKind;
+}): string {
+  const root = opts.request?.root;
+  if (root) return expandPath(root);
+  if (opts.action === 'status' && opts.registryStore === 'postgres') return process.cwd();
+  throw new Error(`managed trigger ${opts.action} requires request.root.`);
+}
+
+function resolveManagedTriggerKnowledgeSpaceId(request: ManagedTriggerRequest | undefined, env: EnvLookup): string {
+  return request?.aily?.knowledgeSpaceId ?? env[AILY_DEFAULT_SPACE_ID_ENV] ?? env[AILY_FALLBACK_SPACE_ID_ENV] ?? '';
+}
+
+export async function runManagedTrigger(input: ManagedTriggerInput = {}) {
+  const request = input.request ?? {};
+  const env = input.env ?? process.env;
+  const action = request.action ?? 'status';
+  const registry = resolveManagedTriggerRegistry({ request, env });
+  const root = resolveManagedTriggerRoot({ action, request, registryStore: registry.registryStore });
+  const sourceId = request.sourceId ?? 'feishu';
+
+  if (action === 'status') {
+    const opts: ManagedRegistryStatusOpts = {
+      path: root,
+      sourceId,
+      ...registry,
+      json: true,
+    };
+    const payload = await runManagedRegistryStatusJob({
+      root,
+      opts,
+      createStoreHandle: input.createStoreHandle,
+    });
+    return {
+      action,
+      status: payload.status,
+      result: payload,
+    };
+  }
+
+  const knowledgeSpaceId = resolveManagedTriggerKnowledgeSpaceId(request, env);
+  if (!knowledgeSpaceId) {
+    throw new Error(`managed trigger sync requires a knowledge space id.`);
+  }
+  const opts: ManagedSyncOpts = {
+    path: root,
+    sourceId,
+    host: normalizeAilyHost(request.aily?.host ?? env.RBRAIN_AILY_HOST ?? env.AILY_HOST ?? AILY_DEFAULT_HOST),
+    knowledgeSpaceId,
+    tokenEnv: request.aily?.tokenEnv ?? AILY_DEFAULT_TOKEN_ENV,
+    sourceUrlBase: normalizeAilyHost(request.aily?.sourceUrlBase ?? AILY_DEFAULT_SOURCE_URL_BASE),
+    limit: request.aily?.limit,
+    replace: request.aily?.replace ?? false,
+    dryRun: request.aily?.dryRun ?? false,
+    json: true,
+    ...registry,
+    trigger: request.trigger ?? 'api',
+    sourceKind: request.source?.kind ?? 'manual',
+    sourceName: request.source?.name ?? 'Feishu',
+    baseToken: request.base?.token,
+    baseTableId: request.base?.tableId,
+    baseAs: request.base?.as,
+  };
+  const job = await runManagedSyncJob({
+    root,
+    opts,
+    env,
+    createStoreHandle: input.createStoreHandle,
+    mirrorBaseRows: input.mirrorBaseRows,
+  });
+  return {
+    action,
+    status: job.payload.status,
+    result: job.payload,
+  };
+}
+
 async function runManaged(engine: BrainEngine | undefined, args: string[]): Promise<void> {
   const sub = args[0];
   if (!sub || sub === '--help' || sub === '-h' || sub === 'help') {
@@ -5422,19 +5583,9 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
       registryUrl: opts.registryUrl,
       ensureSchema: opts.registryEnsureSchema,
     });
-    const registryHandle = await createManagedRegistryStoreHandle(storeConfig);
-    try {
-      const snapshot = await registryHandle.store.load();
-      const payload = buildManagedRegistryStatusPayload({
-        snapshot,
-        registryStore: registryHandle.store,
-        schemaEnsured: storeConfig.ensureSchema,
-      });
-      if (opts.json) console.log(JSON.stringify(payload, null, 2));
-      else printManagedRegistryStatusResult(payload);
-    } finally {
-      await registryHandle.close?.();
-    }
+    const payload = await runManagedRegistryStatusJob({ root, opts, storeConfig });
+    if (opts.json) console.log(JSON.stringify(payload, null, 2));
+    else printManagedRegistryStatusResult(payload);
     return;
   }
   if (sub !== 'sync') {

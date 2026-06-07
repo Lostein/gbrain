@@ -180,10 +180,31 @@ rbrain feishu managed status \
 The status command does not require an Aily token. It reports source/asset/run
 counts, the latest sync run, Aily status counts, and a Base mirror preview.
 
-For an online trigger, import `runManagedSyncJob` from `src/commands/feishu.ts`
-and pass the same parsed registry/store configuration. The CLI uses that job
-function internally, so a Miaoda/server-function trigger can share the same
-JSON/Postgres store behavior without spawning a local shell command.
+For an online trigger, import `runManagedTrigger` from `src/commands/feishu.ts`.
+It accepts an action of `status` or `sync`, reads the same JSON/Postgres store
+configuration, and calls the same job functions used by the CLI:
+
+```ts
+await runManagedTrigger({
+  request: {
+    action: 'sync',
+    root: '/tmp/rbrain-feishu',
+    trigger: 'api',
+    registry: {
+      store: 'postgres',
+      url: process.env.RBRAIN_FEISHU_MANAGED_DATABASE_URL,
+      ensureSchema: true,
+    },
+    aily: {
+      knowledgeSpaceId: process.env.RBRAIN_AILY_KNOWLEDGE_SPACE_ID,
+    },
+  },
+  env: process.env,
+});
+```
+
+A Miaoda/server-function trigger can therefore share the same JSON/Postgres
+store behavior without spawning a local shell command.
 
 Idempotency is registry-driven: if a candidate's hash matches the existing
 asset row, upload is skipped locally; if the hash changes, the Aily asset is
