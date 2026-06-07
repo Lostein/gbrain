@@ -72,6 +72,7 @@ import {
   parseDocManifest,
   pushAilyKnowledgeSpace,
   resolveManagedRegistryStoreConfig,
+  runManagedRegistryProvisionJob,
   runManagedRefreshStatusJob,
   runManagedSyncJob,
   runManagedTrigger,
@@ -345,6 +346,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('managed probe [--action status|sync|refresh-status]');
     expect(stdout).toContain('managed canary --url URL');
     expect(stdout).toContain('managed sql-schema [--json]');
+    expect(stdout).toContain('managed provision-registry --registry-url POSTGRES_URL');
     expect(stdout).toContain('managed provision-base --base-token TOKEN');
   });
 
@@ -1287,6 +1289,47 @@ describe('rbrain feishu command helpers', () => {
     expect(handle.store.location).toBe(pgConfig.location);
     await handle.close?.();
     expect(closed).toBe(true);
+  });
+
+  test('managed provision-registry job applies Postgres schema and reports counts with a redacted URL', async () => {
+    let capturedEnsureSchema = false;
+    let closed = false;
+    const payload = await runManagedRegistryProvisionJob({
+      root: process.cwd(),
+      opts: {
+        sourceId: 'feishu',
+        registryStore: 'postgres',
+        registryUrl: 'postgresql://user:secret-password@example.com:5432/rbrain',
+        registryEnsureSchema: true,
+        json: true,
+      },
+      createStoreHandle: async (config) => {
+        capturedEnsureSchema = config.ensureSchema;
+        return {
+          store: {
+            kind: 'postgres',
+            location: config.location,
+            load: async () => createEmptyManagedRegistry('2026-06-07T10:00:00.000Z'),
+            save: async () => {},
+          },
+          close: async () => {
+            closed = true;
+          },
+        };
+      },
+    });
+
+    expect(capturedEnsureSchema).toBe(true);
+    expect(closed).toBe(true);
+    expect(payload.status).toBe('ok');
+    expect(payload.schema).toMatchObject({
+      dialect: 'postgres',
+      ensured: true,
+      tables: ['feishu_managed_sources', 'feishu_managed_assets', 'feishu_managed_sync_runs'],
+    });
+    expect(payload.counts).toMatchObject({ sources: 0, assets: 0, sync_runs: 0 });
+    expect(payload.registry_store.location).toContain('***');
+    expect(payload.registry_store.location).not.toContain('secret-password');
   });
 
   test('managed status summarizes a local registry without Aily credentials', () => {
