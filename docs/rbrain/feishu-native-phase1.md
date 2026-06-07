@@ -212,4 +212,3 @@ Manual platform checks:
 6. Add mocked Aily create/update/skip tests.
 7. Mirror asset status into a Base table.
 8. Document the prototype setup and manual verification flow.
-
