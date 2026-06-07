@@ -252,6 +252,8 @@ Local tests:
   count readback, and Postgres URL redaction
 - direct `runManagedRefreshStatusJob` coverage for Aily status refresh,
   registry persistence, Base mirror handoff, and token redaction
+- direct `runManagedWaitStatusJob` coverage for successful Aily learning
+  polling, timeout reporting, and persisted final status
 - direct `runManagedSyncJob` invocation without the CLI dispatcher
 - direct `runManagedTrigger` invocation for server-function `status` and `sync`
   requests, plus `refresh-status` state refresh
@@ -274,9 +276,10 @@ Manual platform checks:
   can read the target Serverless PG registry.
 - Miaoda scheduled/manual trigger runs.
 - Serverless PG tables are created and queryable.
-- Aily Knowledge Space receives an asset and reaches `successful`.
-- `managed refresh-status` observes that `successful` state and updates the
-  registry/Base row.
+- Aily Knowledge Space receives an asset and `managed wait-status` observes it
+  reaching `successful`.
+- `managed wait-status` persists that `successful` state to the registry/Base
+  row.
 - Feishu Base shows a readable asset row.
 - Aily agent can answer a question using the uploaded asset.
 
@@ -302,9 +305,9 @@ Manual platform checks:
    manual/scheduled Miaoda trigger using the same registry store.
 5. Run `managed env-check --target canary`, then `managed canary --url ...` or
    separate `managed probe` status/sync/refresh-status checks.
-6. Verify Aily Knowledge Space reaches `successful` for a managed sync asset.
-7. Run `managed refresh-status` against the same registry store and verify the
-   Base status row updates without a second content upload.
+6. Run `managed wait-status` against the same registry store and verify Aily
+   Knowledge Space reaches `successful` for a managed sync asset.
+7. Verify the Base status row updates without a second content upload.
 8. Verify the Aily custom agent answers using the managed asset.
 9. Decide whether `managed sync` remains a developer fixture or becomes the
    canonical debugging client for the online control plane.

@@ -329,6 +329,12 @@ export interface ManagedRefreshStatusOpts extends ManagedRegistryStatusOpts {
   baseAs?: string;
 }
 
+export interface ManagedWaitStatusOpts extends ManagedRefreshStatusOpts {
+  targetStatus: string;
+  timeoutMs: number;
+  intervalMs: number;
+}
+
 interface ManagedBaseProvisionOpts {
   baseToken?: string;
   tableName: string;
@@ -982,6 +988,22 @@ function parseManagedRefreshStatus(
     baseTableId: parseFlagValue(args, '--base-table-id'),
     baseAs: parseFlagValue(args, '--base-as'),
     json: aily.json,
+  };
+}
+
+function parseManagedWaitStatus(
+  args: string[],
+  env: EnvLookup = process.env,
+  opts: { requireKnowledgeSpaceId?: boolean; requireRegistryUrl?: boolean } = {},
+): ManagedWaitStatusOpts {
+  const refresh = parseManagedRefreshStatus(args, env, opts);
+  const targetStatus = parseFlagValue(args, '--target-status') ?? 'successful';
+  if (!targetStatus.trim()) throw new Error('--target-status cannot be empty');
+  return {
+    ...refresh,
+    targetStatus,
+    timeoutMs: parsePositiveIntFlag(args, '--timeout-ms') ?? 300_000,
+    intervalMs: parsePositiveIntFlag(args, '--interval-ms') ?? 15_000,
   };
 }
 
@@ -5662,6 +5684,130 @@ export async function runManagedRefreshStatusJob(input: ManagedRefreshStatusJobI
   }
 }
 
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type ManagedWaitStatusResultStatus = 'ok' | 'timeout' | 'empty';
+
+function managedWaitStatusDone(
+  payload: ReturnType<typeof buildManagedRefreshStatusPayload>,
+  targetStatus: string,
+): boolean {
+  return payload.checked > 0 &&
+    payload.missing === 0 &&
+    payload.assets.every((asset) => asset.current_status === targetStatus);
+}
+
+function buildManagedWaitStatusPayload(opts: {
+  status: ManagedWaitStatusResultStatus;
+  targetStatus: string;
+  attempts: number;
+  elapsedMs: number;
+  timeoutMs: number;
+  intervalMs: number;
+  final: ReturnType<typeof buildManagedRefreshStatusPayload>;
+}) {
+  return {
+    status: opts.status,
+    target_status: opts.targetStatus,
+    attempts: opts.attempts,
+    elapsed_ms: opts.elapsedMs,
+    timeout_ms: opts.timeoutMs,
+    interval_ms: opts.intervalMs,
+    final: opts.final,
+  };
+}
+
+function printManagedWaitStatusResult(payload: ReturnType<typeof buildManagedWaitStatusPayload>): void {
+  console.log(`Feishu managed Aily wait-status: ${payload.status}`);
+  console.log(
+    `  target: ${payload.target_status}, attempts: ${payload.attempts}, ` +
+    `elapsed: ${payload.elapsed_ms}ms`,
+  );
+  console.log(
+    `  final: ${payload.final.checked} checked, ${payload.final.matched} matched, ` +
+    `${payload.final.missing} missing, ${payload.final.updated} updated`,
+  );
+  const statuses = Object.entries(payload.final.aily_statuses)
+    .map(([status, count]) => `${status}=${count}`)
+    .join(', ');
+  console.log(`  statuses: ${statuses || 'none'}`);
+}
+
+export interface ManagedWaitStatusJobInput {
+  root: string;
+  opts: ManagedWaitStatusOpts;
+  env: EnvLookup;
+  storeConfig?: ManagedRegistryStoreConfig;
+  createStoreHandle?: typeof createManagedRegistryStoreHandle;
+  mirrorBaseRows?: ManagedBaseMirrorRowsImpl;
+  fetchImpl?: FetchLike;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+export async function runManagedWaitStatusJob(input: ManagedWaitStatusJobInput) {
+  const now = input.now ?? (() => Date.now());
+  const sleep = input.sleep ?? sleepMs;
+  const start = now();
+  let attempts = 0;
+  let finalPayload: ReturnType<typeof buildManagedRefreshStatusPayload> | null = null;
+
+  while (true) {
+    attempts++;
+    const refresh = await runManagedRefreshStatusJob({
+      root: input.root,
+      opts: input.opts,
+      env: input.env,
+      storeConfig: input.storeConfig,
+      createStoreHandle: input.createStoreHandle,
+      mirrorBaseRows: input.mirrorBaseRows,
+      fetchImpl: input.fetchImpl,
+    });
+    finalPayload = refresh.payload;
+
+    if (finalPayload.checked === 0) {
+      return buildManagedWaitStatusPayload({
+        status: 'empty',
+        targetStatus: input.opts.targetStatus,
+        attempts,
+        elapsedMs: Math.max(0, now() - start),
+        timeoutMs: input.opts.timeoutMs,
+        intervalMs: input.opts.intervalMs,
+        final: finalPayload,
+      });
+    }
+
+    if (managedWaitStatusDone(finalPayload, input.opts.targetStatus)) {
+      return buildManagedWaitStatusPayload({
+        status: 'ok',
+        targetStatus: input.opts.targetStatus,
+        attempts,
+        elapsedMs: Math.max(0, now() - start),
+        timeoutMs: input.opts.timeoutMs,
+        intervalMs: input.opts.intervalMs,
+        final: finalPayload,
+      });
+    }
+
+    const elapsedMs = Math.max(0, now() - start);
+    if (elapsedMs >= input.opts.timeoutMs) {
+      return buildManagedWaitStatusPayload({
+        status: 'timeout',
+        targetStatus: input.opts.targetStatus,
+        attempts,
+        elapsedMs,
+        timeoutMs: input.opts.timeoutMs,
+        intervalMs: input.opts.intervalMs,
+        final: finalPayload,
+      });
+    }
+
+    await sleep(Math.min(input.opts.intervalMs, input.opts.timeoutMs - elapsedMs));
+  }
+}
+
 export interface ManagedSyncJobInput {
   root: string;
   opts: ManagedSyncOpts;
@@ -6341,6 +6487,7 @@ rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --json
 rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
 rbrain feishu managed canary --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
 rbrain feishu managed probe --action refresh-status --url https://your-runtime.example/trigger --json
+rbrain feishu managed wait-status --registry-url "$RBRAIN_FEISHU_MANAGED_DATABASE_URL" --space-id "$RBRAIN_AILY_KNOWLEDGE_SPACE_ID" --json
 \`\`\`
 
 - Serverless PG has rows in \`feishu_managed_sources\`,
@@ -6980,8 +7127,35 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     if (job.payload.status === 'partial' || job.payload.base_mirror.failed > 0) process.exitCode = 1;
     return;
   }
+  if (sub === 'wait-status') {
+    const rawArgs = args.slice(1);
+    const initialOpts = parseManagedWaitStatus(rawArgs, loadAilyEnv(rawArgs), {
+      requireKnowledgeSpaceId: false,
+      requireRegistryUrl: false,
+    });
+    const root = await resolveManagedRegistryRoot(engine, initialOpts, 'wait-status');
+    const env = loadAilyEnv(rawArgs, root);
+    const opts = parseManagedWaitStatus(rawArgs, env);
+    const storeConfig = resolveManagedRegistryStoreConfig({
+      kind: opts.registryStore,
+      root,
+      registryPath: opts.registryPath,
+      registryUrl: opts.registryUrl,
+      ensureSchema: opts.registryEnsureSchema,
+    });
+    const payload = await runManagedWaitStatusJob({
+      root,
+      opts,
+      env,
+      storeConfig,
+    });
+    if (opts.json) console.log(JSON.stringify(payload, null, 2));
+    else printManagedWaitStatusResult(payload);
+    if (payload.status !== 'ok' || payload.final.base_mirror.failed > 0) process.exitCode = 1;
+    return;
+  }
   if (sub !== 'sync') {
-    throw new Error(`Usage: ${brand()} feishu managed <sync|refresh-status|status|base-template|trigger-template|deploy-bundle|env-check|probe|canary|provision-registry|provision-base|sql-schema> [options]`);
+    throw new Error(`Usage: ${brand()} feishu managed <sync|refresh-status|wait-status|status|base-template|trigger-template|deploy-bundle|env-check|probe|canary|provision-registry|provision-base|sql-schema> [options]`);
   }
 
   const rawArgs = args.slice(1);
@@ -7429,6 +7603,11 @@ COMMANDS
                          [--base-token TOKEN --base-table-id TABLE] [--json]
       Re-read Aily knowledge asset statuses and update registry/Base status rows.
 
+  managed wait-status [--path DIR] [--registry-store json|postgres] [--registry-url POSTGRES_URL]
+                      [--space-id knowledge_space_xxx] [--target-status successful]
+                      [--timeout-ms 300000] [--interval-ms 15000] [--json]
+      Poll Aily status refresh until managed assets reach the target status.
+
   managed base-template [--json]
       Print the Feishu Base field template used by managed sync status mirroring.
 
@@ -7498,9 +7677,11 @@ EXAMPLES
   ${brand()} feishu managed provision-base --base-token appxxx --table-name "RBrain Managed Assets" --dry-run --json
   ${brand()} feishu managed sync --path ~/rbrain-feishu --space-id knowledge_space_xxx --dry-run --json
   ${brand()} feishu managed refresh-status --path ~/rbrain-feishu --space-id knowledge_space_xxx --json
+  ${brand()} feishu managed wait-status --path ~/rbrain-feishu --space-id knowledge_space_xxx --timeout-ms 300000 --json
   ${brand()} feishu managed status --path ~/rbrain-feishu --json
   ${brand()} feishu managed sync --path ~/rbrain-feishu --registry-store postgres --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --registry-ensure-schema --space-id knowledge_space_xxx
   ${brand()} feishu managed refresh-status --registry-store postgres --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --space-id knowledge_space_xxx --json
+  ${brand()} feishu managed wait-status --registry-store postgres --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --space-id knowledge_space_xxx --json
   ${brand()} feishu managed status --registry-store postgres --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --json
   ${AILY_DEFAULT_TOKEN_ENV}=... ${brand()} feishu aily push-space --space-id knowledge_space_xxx
   ${brand()} feishu doctor
