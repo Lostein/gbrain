@@ -5711,7 +5711,7 @@ export async function runManagedSyncJob(input: ManagedSyncJobInput) {
   }
 }
 
-export type ManagedTriggerAction = 'status' | 'sync';
+export type ManagedTriggerAction = 'status' | 'sync' | 'refresh-status';
 
 export interface ManagedTriggerRequest {
   action?: ManagedTriggerAction;
@@ -5749,6 +5749,7 @@ export interface ManagedTriggerInput {
   env?: EnvLookup;
   createStoreHandle?: typeof createManagedRegistryStoreHandle;
   mirrorBaseRows?: ManagedBaseMirrorRowsImpl;
+  fetchImpl?: FetchLike;
 }
 
 export interface ManagedTriggerHttpRequest {
@@ -5904,7 +5905,7 @@ function resolveManagedTriggerRoot(opts: {
 }): string {
   const root = opts.request?.root ?? opts.env[MANAGED_MIRROR_ROOT_ENV];
   if (root) return expandPath(root);
-  if (opts.action === 'status' && opts.registryStore === 'postgres') return process.cwd();
+  if ((opts.action === 'status' || opts.action === 'refresh-status') && opts.registryStore === 'postgres') return process.cwd();
   throw new Error(`managed trigger ${opts.action} requires request.root.`);
 }
 
@@ -5941,26 +5942,50 @@ export async function runManagedTrigger(input: ManagedTriggerInput = {}) {
 
   const knowledgeSpaceId = resolveManagedTriggerKnowledgeSpaceId(request, env);
   if (!knowledgeSpaceId) {
-    throw new Error(`managed trigger sync requires a knowledge space id.`);
+    throw new Error(`managed trigger ${action} requires a knowledge space id.`);
   }
-  const opts: ManagedSyncOpts = {
+  const commonAily = {
     path: root,
     sourceId,
     host: normalizeAilyHost(request.aily?.host ?? env.RBRAIN_AILY_HOST ?? env.AILY_HOST ?? AILY_DEFAULT_HOST),
     knowledgeSpaceId,
     tokenEnv: request.aily?.tokenEnv ?? AILY_DEFAULT_TOKEN_ENV,
-    sourceUrlBase: normalizeAilyHost(request.aily?.sourceUrlBase ?? AILY_DEFAULT_SOURCE_URL_BASE),
-    limit: request.aily?.limit,
-    replace: request.aily?.replace ?? false,
     dryRun: request.aily?.dryRun ?? false,
     json: true,
     ...registry,
-    trigger: request.trigger ?? 'api',
-    sourceKind: request.source?.kind ?? 'manual',
-    sourceName: request.source?.name ?? 'Feishu',
     baseToken: request.base?.token ?? env[MANAGED_BASE_TOKEN_ENV],
     baseTableId: request.base?.tableId ?? env[MANAGED_BASE_TABLE_ID_ENV],
     baseAs: request.base?.as ?? env[MANAGED_BASE_AS_ENV],
+  };
+
+  if (action === 'refresh-status') {
+    const opts: ManagedRefreshStatusOpts = {
+      ...commonAily,
+      limit: request.aily?.limit,
+    };
+    const job = await runManagedRefreshStatusJob({
+      root,
+      opts,
+      env,
+      createStoreHandle: input.createStoreHandle,
+      mirrorBaseRows: input.mirrorBaseRows,
+      fetchImpl: input.fetchImpl,
+    });
+    return {
+      action,
+      status: job.payload.status,
+      result: job.payload,
+    };
+  }
+
+  const opts: ManagedSyncOpts = {
+    ...commonAily,
+    sourceUrlBase: normalizeAilyHost(request.aily?.sourceUrlBase ?? AILY_DEFAULT_SOURCE_URL_BASE),
+    limit: request.aily?.limit,
+    replace: request.aily?.replace ?? false,
+    trigger: request.trigger ?? 'api',
+    sourceKind: request.source?.kind ?? 'manual',
+    sourceName: request.source?.name ?? 'Feishu',
   };
   const job = await runManagedSyncJob({
     root,
@@ -5981,6 +6006,7 @@ export async function handleManagedTriggerRequest(input: {
   env?: EnvLookup;
   createStoreHandle?: typeof createManagedRegistryStoreHandle;
   mirrorBaseRows?: ManagedBaseMirrorRowsImpl;
+  fetchImpl?: FetchLike;
 } = {}): Promise<ManagedTriggerHttpResponse> {
   const method = (input.request?.method ?? 'POST').toUpperCase();
   if (method !== 'POST') {
@@ -5997,6 +6023,7 @@ export async function handleManagedTriggerRequest(input: {
       env: input.env,
       createStoreHandle: input.createStoreHandle,
       mirrorBaseRows: input.mirrorBaseRows,
+      fetchImpl: input.fetchImpl,
     });
     return managedTriggerJsonResponse(result.status === 'partial' ? 207 : 200, result);
   } catch (error) {
@@ -6094,6 +6121,29 @@ export async function status(): Promise<Response> {
   });
   return toWebResponse(response);
 }
+
+export async function refreshStatus(): Promise<Response> {
+  const env = runtimeEnv();
+  const response = await handleManagedTriggerRequest({
+    request: {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'refresh-status',
+        registry: postgresRegistry(env),
+        aily: {
+          knowledgeSpaceId: env.RBRAIN_AILY_KNOWLEDGE_SPACE_ID,
+          tokenEnv: 'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN',
+        },
+        base: {
+          token: env.RBRAIN_FEISHU_MANAGED_BASE_TOKEN,
+          tableId: env.RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID,
+        },
+      }),
+    },
+    env,
+  });
+  return toWebResponse(response);
+}
 `;
 }
 
@@ -6152,7 +6202,8 @@ Miaoda or another TypeScript server-function runtime.
 
 ## Files
 
-- \`feishu-managed-trigger.ts\`: HTTP, scheduled sync, and status entrypoints.
+- \`feishu-managed-trigger.ts\`: HTTP, scheduled sync, status, and
+  refresh-status entrypoints.
   It imports \`handleManagedTriggerRequest\` from \`${opts.importSpecifier}\`.
 - \`feishu-managed-registry.sql\`: Postgres DDL for managed sources, assets,
   and sync runs.
@@ -6188,6 +6239,7 @@ rbrain feishu managed canary --url https://your-runtime.example/trigger --status
 rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --json
 rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
 rbrain feishu managed canary --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
+rbrain feishu managed probe --action refresh-status --url https://your-runtime.example/trigger --json
 \`\`\`
 
 - Serverless PG has rows in \`feishu_managed_sources\`,
@@ -6195,6 +6247,8 @@ rbrain feishu managed canary --root /tmp/rbrain-feishu --url https://your-runtim
 - Aily Knowledge Space receives the asset and eventually reports
   \`successful\`.
 - Feishu Base shows the same asset status row when Base env vars are set.
+- Refresh-status probes can observe Aily's latest asset status without
+  re-uploading unchanged content.
 
 ## Runtime Contract
 
@@ -6350,7 +6404,7 @@ export function buildManagedEnvCheck(opts: {
   const env = opts.env ?? process.env;
   const target = opts.target ?? 'sync';
   const needsSync = target === 'canary' || target === 'sync';
-  const needsRealSync = target === 'sync';
+  const needsAilyToken = target === 'canary' || target === 'sync';
   const checks: ManagedEnvCheckItem[] = [
     managedEnvSingleCheck({
       id: 'serverless_pg',
@@ -6381,11 +6435,8 @@ export function buildManagedEnvCheck(opts: {
         id: 'aily_token',
         keys: [AILY_DEFAULT_TOKEN_ENV, AILY_FALLBACK_TOKEN_ENV],
         env,
-        required: needsRealSync,
-        purpose: 'Aily Knowledge Space API token for non-dry-run sync.',
-        message: needsRealSync
-          ? undefined
-          : 'Not required for the default dry-run canary, but required before --no-dry-run or scheduled sync.',
+        required: needsAilyToken,
+        purpose: 'Aily Knowledge Space API token for sync and refresh-status checks.',
       }),
     );
   }
@@ -6402,7 +6453,7 @@ export function buildManagedEnvCheck(opts: {
   if (target === 'status') {
     nextSteps.push('Run managed canary with --status-only after deploying the trigger.');
   } else if (target === 'canary') {
-    nextSteps.push('Run managed canary without --no-dry-run, then inspect status and dry-run sync output.');
+    nextSteps.push('Run managed canary, then inspect status, dry-run sync, and refresh-status output.');
   } else {
     nextSteps.push('Run managed canary in dry-run mode before enabling --no-dry-run or scheduled sync.');
   }
@@ -6439,7 +6490,8 @@ function printManagedEnvCheckResult(payload: ManagedEnvCheckResult, json: boolea
 function parseManagedProbeAction(input: string | undefined): ManagedTriggerAction {
   if (input === undefined || input === 'status') return 'status';
   if (input === 'sync') return 'sync';
-  throw new Error(`--action must be one of status, sync`);
+  if (input === 'refresh-status') return 'refresh-status';
+  throw new Error(`--action must be one of status, sync, refresh-status`);
 }
 
 function parseManagedHttpUrl(raw: string | undefined, command: string, required = false): string | undefined {
@@ -6497,6 +6549,8 @@ export function buildManagedTriggerProbeRequest(opts: ManagedTriggerProbeOpts = 
   if (opts.root) request.root = opts.root;
   if (action === 'sync') {
     request.trigger = opts.trigger ?? 'probe';
+  }
+  if (action === 'sync' || action === 'refresh-status') {
     request.aily = {
       dryRun: opts.dryRun ?? true,
     };
@@ -6622,8 +6676,36 @@ export async function runManagedTriggerCanary(opts: {
   });
   steps.push(managedCanaryStep('sync', syncProbe));
 
+  if (syncProbe.status !== 'ok') {
+    steps.push({
+      name: 'refresh-status',
+      status: 'skipped',
+      reason: 'sync probe failed',
+    });
+    return {
+      status: 'error',
+      url: redactDeep(opts.url),
+      dry_run: opts.dryRun ?? true,
+      steps,
+    };
+  }
+
+  const refreshRequest = buildManagedTriggerProbeRequest({
+    action: 'refresh-status',
+    root: opts.root,
+    sourceId: opts.sourceId,
+    ensureSchema: opts.ensureSchema,
+    dryRun: opts.dryRun,
+  });
+  const refreshProbe = await sendManagedTriggerProbe({
+    url: opts.url,
+    request: refreshRequest,
+    fetchImpl: opts.fetchImpl,
+  });
+  steps.push(managedCanaryStep('refresh-status', refreshProbe));
+
   return {
-    status: syncProbe.status === 'ok' ? 'ok' : 'error',
+    status: refreshProbe.status === 'ok' ? 'ok' : 'error',
     url: redactDeep(opts.url),
     dry_run: opts.dryRun ?? true,
     steps,
@@ -6637,7 +6719,7 @@ function printManagedTriggerCanaryResult(payload: ManagedTriggerCanaryResult, js
   }
   console.log(`Feishu managed canary: ${payload.status}`);
   console.log(`  url: ${payload.url}`);
-  console.log(`  dry-run sync: ${payload.dry_run ? 'yes' : 'no'}`);
+  console.log(`  dry-run actions: ${payload.dry_run ? 'yes' : 'no'}`);
   for (const step of payload.steps) {
     const detail = step.response ? `HTTP ${step.response.status}` : step.reason ?? '';
     console.log(`  - ${step.name}: ${step.status}${detail ? ` (${detail})` : ''}`);
@@ -7242,11 +7324,12 @@ COMMANDS
   managed env-check [--target status|canary|sync] [--env-file FILE] [--json]
       Check managed runtime env names without printing secret values.
 
-  managed probe [--action status|sync] [--root DIR] [--url URL] [--json]
-      Print or POST a managed trigger status/sync probe. Sync probes default to dry-run.
+  managed probe [--action status|sync|refresh-status] [--root DIR] [--url URL] [--json]
+      Print or POST a managed trigger status/sync/refresh-status probe.
+      Sync and refresh-status probes default to dry-run.
 
   managed canary --url URL [--root DIR] [--status-only] [--json]
-      POST status then dry-run sync probes to a deployed managed trigger.
+      POST status, dry-run sync, then refresh-status probes to a deployed trigger.
 
   managed sql-schema [--json]
       Print the Postgres DDL for the managed sources/assets/sync_runs registry.
@@ -7288,6 +7371,7 @@ EXAMPLES
   ${brand()} feishu managed env-check --target canary --env-file ./feishu-managed-deploy/.env.example --json
   ${brand()} feishu managed probe --action status --json
   ${brand()} feishu managed probe --action sync --root ~/rbrain-feishu --url https://example.com/trigger --json
+  ${brand()} feishu managed probe --action refresh-status --url https://example.com/trigger --json
   ${brand()} feishu managed canary --root ~/rbrain-feishu --url https://example.com/trigger --json
   ${brand()} feishu managed sql-schema > feishu-managed-registry.sql
   ${brand()} feishu managed provision-base --base-token appxxx --table-name "RBrain Managed Assets" --dry-run --json

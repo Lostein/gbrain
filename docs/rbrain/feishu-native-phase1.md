@@ -199,8 +199,8 @@ The local adapter:
   registry/Base without re-uploading content
 - extracts `runManagedSyncJob` so a Miaoda/server-function trigger can reuse
   the same sync implementation instead of shelling out to the CLI
-- adds `runManagedTrigger` as the thin server-function adapter for `status` and
-  `sync` requests
+- adds `runManagedTrigger` as the thin server-function adapter for `status`,
+  `sync`, and `refresh-status` requests
 - adds `handleManagedTriggerRequest` for HTTP-style server functions with JSON
   request/response handling and error redaction
 - prints a deployable TypeScript wrapper with
@@ -211,10 +211,11 @@ The local adapter:
   README
 - checks runtime environment readiness with `rbrain feishu managed env-check`
   without printing secret values
-- prints or POSTs status/sync trigger probes with `rbrain feishu managed probe`
-  so real Miaoda deployments can be smoke-tested without hand-written JSON
-- runs `rbrain feishu managed canary` to execute status first and then dry-run
-  sync against a deployed trigger URL
+- prints or POSTs status/sync/refresh-status trigger probes with
+  `rbrain feishu managed probe` so real Miaoda deployments can be smoke-tested
+  without hand-written JSON
+- runs `rbrain feishu managed canary` to execute status first, then dry-run
+  sync, then refresh-status against a deployed trigger URL
 
 It is intentionally not the final managed backend. The sync path now talks to a
 registry store boundary, and both the default JSON store and the Postgres store
@@ -249,19 +250,19 @@ Local tests:
   registry persistence, Base mirror handoff, and token redaction
 - direct `runManagedSyncJob` invocation without the CLI dispatcher
 - direct `runManagedTrigger` invocation for server-function `status` and `sync`
-  requests
+  requests, plus `refresh-status` state refresh
 - HTTP trigger wrapper coverage for method rejection and PostgreSQL URL
   redaction
-- generated trigger template coverage for public import path, scheduled/status
-  entrypoints, and no embedded secrets
+- generated trigger template coverage for public import path,
+  scheduled/status/refresh-status entrypoints, and no embedded secrets
 - generated deployment bundle coverage for trigger, SQL, env example, README,
   and overwrite protection
-- managed env-check coverage for required variables, canary vs real sync token
-  requirements, optional Base mirror pairing, and no value leakage
-- managed probe coverage for status/sync request generation, dry-run default,
-  HTTP POST wiring, and runtime env fallback
-- managed canary coverage for status-before-sync sequencing, dry-run default,
-  and sync skip behavior after status failure
+- managed env-check coverage for required variables, canary refresh-status
+  token requirements, optional Base mirror pairing, and no value leakage
+- managed probe coverage for status/sync/refresh-status request generation,
+  dry-run default, HTTP POST wiring, and runtime env fallback
+- managed canary coverage for status-before-sync sequencing, refresh-status
+  after sync, dry-run default, and skip behavior after status/sync failure
 
 Manual platform checks:
 
@@ -295,8 +296,7 @@ Manual platform checks:
 4. Deploy the generated `managed deploy-bundle` output as a real
    manual/scheduled Miaoda trigger using the same registry store.
 5. Run `managed env-check --target canary`, then `managed canary --url ...` or
-   separate `managed probe` status/sync
-   checks.
+   separate `managed probe` status/sync/refresh-status checks.
 6. Verify Aily Knowledge Space reaches `successful` for a managed sync asset.
 7. Run `managed refresh-status` against the same registry store and verify the
    Base status row updates without a second content upload.
