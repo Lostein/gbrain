@@ -206,6 +206,8 @@ The local adapter:
 - writes a complete starter bundle with `rbrain feishu managed deploy-bundle`,
   including the trigger wrapper, Postgres DDL, `.env.example`, and deployment
   README
+- prints or POSTs status/sync trigger probes with `rbrain feishu managed probe`
+  so real Miaoda deployments can be smoke-tested without hand-written JSON
 
 It is intentionally not the final managed backend. The sync path now talks to a
 registry store boundary, and both the default JSON store and the Postgres store
@@ -245,6 +247,8 @@ Local tests:
   entrypoints, and no embedded secrets
 - generated deployment bundle coverage for trigger, SQL, env example, README,
   and overwrite protection
+- managed probe coverage for status/sync request generation, dry-run default,
+  HTTP POST wiring, and runtime env fallback
 
 Manual platform checks:
 
@@ -275,7 +279,8 @@ Manual platform checks:
    PG connection.
 4. Deploy the generated `managed deploy-bundle` output as a real
    manual/scheduled Miaoda trigger using the same registry store.
-5. Verify Aily Knowledge Space reaches `successful` for a managed sync asset.
-6. Verify the Aily custom agent answers using the managed asset.
-7. Decide whether `managed sync` remains a developer fixture or becomes the
+5. Run `managed probe --action status --url ...` and then a dry-run sync probe.
+6. Verify Aily Knowledge Space reaches `successful` for a managed sync asset.
+7. Verify the Aily custom agent answers using the managed asset.
+8. Decide whether `managed sync` remains a developer fixture or becomes the
    canonical debugging client for the online control plane.

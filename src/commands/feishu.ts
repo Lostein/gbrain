@@ -58,13 +58,17 @@ const MANAGED_REGISTRY_STORE_ENV = 'RBRAIN_FEISHU_MANAGED_REGISTRY_STORE';
 const MANAGED_REGISTRY_DATABASE_URL_ENV = 'RBRAIN_FEISHU_MANAGED_DATABASE_URL';
 const MANAGED_TRIGGER_TEMPLATE_IMPORT = 'gbrain/feishu-managed';
 const MANAGED_DEPLOY_BUNDLE_DEFAULT_DIR = './feishu-managed-deploy';
+const MANAGED_MIRROR_ROOT_ENV = 'RBRAIN_FEISHU_MIRROR_ROOT';
+const MANAGED_BASE_TOKEN_ENV = 'RBRAIN_FEISHU_MANAGED_BASE_TOKEN';
+const MANAGED_BASE_TABLE_ID_ENV = 'RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID';
+const MANAGED_BASE_AS_ENV = 'RBRAIN_FEISHU_MANAGED_BASE_AS';
 const MANAGED_TRIGGER_TEMPLATE_ENV = [
-  'RBRAIN_FEISHU_MIRROR_ROOT',
+  MANAGED_MIRROR_ROOT_ENV,
   MANAGED_REGISTRY_DATABASE_URL_ENV,
   AILY_DEFAULT_SPACE_ID_ENV,
   AILY_DEFAULT_TOKEN_ENV,
-  'RBRAIN_FEISHU_MANAGED_BASE_TOKEN',
-  'RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID',
+  MANAGED_BASE_TOKEN_ENV,
+  MANAGED_BASE_TABLE_ID_ENV,
 ] as const;
 const AILY_MAX_ASSET_BYTES = 30 * 1024 * 1024;
 const AILY_OVERVIEW_RELATIVE_PATH = 'feishu/rbrain-feishu-overview.md';
@@ -5488,6 +5492,34 @@ interface ManagedDeployBundleFileSpec {
   content: string;
 }
 
+export interface ManagedTriggerProbeOpts {
+  action?: ManagedTriggerAction;
+  root?: string;
+  sourceId?: string;
+  ensureSchema?: boolean;
+  dryRun?: boolean;
+  trigger?: string;
+}
+
+interface ManagedTriggerProbeCliOpts extends ManagedTriggerProbeOpts {
+  url?: string;
+  json: boolean;
+}
+
+export interface ManagedTriggerProbeSendResult {
+  status: 'ok' | 'error';
+  url: string;
+  request: ManagedTriggerRequest;
+  response: {
+    status: number;
+    content_type: string | null;
+    body: string;
+    json?: unknown;
+  };
+}
+
+type ManagedTriggerProbeFetch = (url: string, init: RequestInit) => Promise<Response>;
+
 function parseManagedTriggerHttpBody(input: string | ManagedTriggerRequest | null | undefined): ManagedTriggerRequest {
   if (input === undefined || input === null || input === '') return {};
   if (typeof input !== 'string') return input;
@@ -5532,9 +5564,10 @@ function resolveManagedTriggerRegistry(opts: {
 function resolveManagedTriggerRoot(opts: {
   action: ManagedTriggerAction;
   request?: ManagedTriggerRequest;
+  env: EnvLookup;
   registryStore: ManagedRegistryStoreKind;
 }): string {
-  const root = opts.request?.root;
+  const root = opts.request?.root ?? opts.env[MANAGED_MIRROR_ROOT_ENV];
   if (root) return expandPath(root);
   if (opts.action === 'status' && opts.registryStore === 'postgres') return process.cwd();
   throw new Error(`managed trigger ${opts.action} requires request.root.`);
@@ -5549,7 +5582,7 @@ export async function runManagedTrigger(input: ManagedTriggerInput = {}) {
   const env = input.env ?? process.env;
   const action = request.action ?? 'status';
   const registry = resolveManagedTriggerRegistry({ request, env });
-  const root = resolveManagedTriggerRoot({ action, request, registryStore: registry.registryStore });
+  const root = resolveManagedTriggerRoot({ action, request, env, registryStore: registry.registryStore });
   const sourceId = request.sourceId ?? 'feishu';
 
   if (action === 'status') {
@@ -5590,9 +5623,9 @@ export async function runManagedTrigger(input: ManagedTriggerInput = {}) {
     trigger: request.trigger ?? 'api',
     sourceKind: request.source?.kind ?? 'manual',
     sourceName: request.source?.name ?? 'Feishu',
-    baseToken: request.base?.token,
-    baseTableId: request.base?.tableId,
-    baseAs: request.base?.as,
+    baseToken: request.base?.token ?? env[MANAGED_BASE_TOKEN_ENV],
+    baseTableId: request.base?.tableId ?? env[MANAGED_BASE_TABLE_ID_ENV],
+    baseAs: request.base?.as ?? env[MANAGED_BASE_AS_ENV],
   };
   const job = await runManagedSyncJob({
     root,
@@ -5801,17 +5834,17 @@ Miaoda or another TypeScript server-function runtime.
    server-function entrypoint.
 5. Run a status probe before enabling a full sync:
 
-\`\`\`json
-{
-  "action": "status",
-  "registry": {
-    "store": "postgres",
-    "ensureSchema": true
-  }
-}
+\`\`\`bash
+rbrain feishu managed probe --action status --json
+rbrain feishu managed probe --action status --url https://your-runtime.example/trigger --json
 \`\`\`
 
-6. Run a sync probe with a small mirror root and verify:
+6. Run a dry-run sync probe with a small mirror root and verify:
+
+\`\`\`bash
+rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --json
+rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
+\`\`\`
 
 - Serverless PG has rows in \`feishu_managed_sources\`,
   \`feishu_managed_assets\`, and \`feishu_managed_sync_runs\`.
@@ -5894,6 +5927,108 @@ function printManagedDeployBundleResult(payload: ReturnType<typeof writeManagedD
   for (const key of payload.env) console.log(`  - ${key}`);
 }
 
+function parseManagedProbeAction(input: string | undefined): ManagedTriggerAction {
+  if (input === undefined || input === 'status') return 'status';
+  if (input === 'sync') return 'sync';
+  throw new Error(`--action must be one of status, sync`);
+}
+
+function parseManagedTriggerProbe(args: string[]): ManagedTriggerProbeCliOpts {
+  const action = parseManagedProbeAction(parseFlagValue(args, '--action') ?? parseFlagValue(args, '--type'));
+  const url = parseFlagValue(args, '--url');
+  if (url) {
+    try {
+      const parsed = new URL(url);
+      if (!/^https?:$/i.test(parsed.protocol)) throw new Error('invalid protocol');
+    } catch {
+      throw new Error(`${brand()} feishu managed probe --url must be an http(s) URL.`);
+    }
+  }
+  return {
+    action,
+    url,
+    root: parseFlagValue(args, '--root') ? expandPath(parseFlagValue(args, '--root')!) : undefined,
+    sourceId: parseFlagValue(args, '--source-id'),
+    ensureSchema: !args.includes('--no-ensure-schema'),
+    dryRun: !args.includes('--no-dry-run'),
+    trigger: parseFlagValue(args, '--trigger') ?? 'probe',
+    json: args.includes('--json'),
+  };
+}
+
+export function buildManagedTriggerProbeRequest(opts: ManagedTriggerProbeOpts = {}): ManagedTriggerRequest {
+  const action = opts.action ?? 'status';
+  const request: ManagedTriggerRequest = {
+    action,
+    registry: {
+      store: 'postgres',
+      ensureSchema: opts.ensureSchema ?? true,
+    },
+  };
+  if (opts.sourceId) request.sourceId = opts.sourceId;
+  if (opts.root) request.root = opts.root;
+  if (action === 'sync') {
+    request.trigger = opts.trigger ?? 'probe';
+    request.aily = {
+      dryRun: opts.dryRun ?? true,
+    };
+  }
+  return request;
+}
+
+function parseManagedProbeResponseJson(body: string): unknown | undefined {
+  try {
+    return JSON.parse(body) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function sendManagedTriggerProbe(opts: {
+  url: string;
+  request: ManagedTriggerRequest;
+  fetchImpl?: ManagedTriggerProbeFetch;
+}): Promise<ManagedTriggerProbeSendResult> {
+  const fetchImpl: ManagedTriggerProbeFetch = opts.fetchImpl ?? ((url, init) => fetch(url, init));
+  const response = await fetchImpl(opts.url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(opts.request),
+  });
+  const body = await response.text();
+  const json = parseManagedProbeResponseJson(body);
+  return {
+    status: response.ok ? 'ok' : 'error',
+    url: redactDeep(opts.url),
+    request: opts.request,
+    response: {
+      status: response.status,
+      content_type: response.headers.get('content-type'),
+      body,
+      ...(json === undefined ? {} : { json }),
+    },
+  };
+}
+
+function printManagedTriggerProbePreview(request: ManagedTriggerRequest, json: boolean): void {
+  if (json) {
+    console.log(JSON.stringify({ status: 'preview', request }, null, 2));
+    return;
+  }
+  console.log(JSON.stringify(request, null, 2));
+}
+
+function printManagedTriggerProbeResult(payload: ManagedTriggerProbeSendResult, json: boolean): void {
+  if (json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  console.log(`Feishu managed probe: ${payload.status}`);
+  console.log(`  url: ${payload.url}`);
+  console.log(`  response: HTTP ${payload.response.status}`);
+  if (payload.response.body) console.log(payload.response.body);
+}
+
 async function runManaged(engine: BrainEngine | undefined, args: string[]): Promise<void> {
   const sub = args[0];
   if (!sub || sub === '--help' || sub === '-h' || sub === 'help') {
@@ -5911,6 +6046,18 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
   if (sub === 'deploy-bundle') {
     const opts = parseManagedDeployBundle(args.slice(1));
     printManagedDeployBundleResult(writeManagedDeployBundle(opts), opts.json);
+    return;
+  }
+  if (sub === 'probe') {
+    const opts = parseManagedTriggerProbe(args.slice(1));
+    const request = buildManagedTriggerProbeRequest(opts);
+    if (!opts.url) {
+      printManagedTriggerProbePreview(request, opts.json);
+      return;
+    }
+    const payload = await sendManagedTriggerProbe({ url: opts.url, request });
+    printManagedTriggerProbeResult(payload, opts.json);
+    if (payload.status === 'error') process.exitCode = 1;
     return;
   }
   if (sub === 'sql-schema') {
@@ -5952,7 +6099,7 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     return;
   }
   if (sub !== 'sync') {
-    throw new Error(`Usage: ${brand()} feishu managed <sync|status|base-template|trigger-template|deploy-bundle|provision-base|sql-schema> [options]`);
+    throw new Error(`Usage: ${brand()} feishu managed <sync|status|base-template|trigger-template|deploy-bundle|probe|provision-base|sql-schema> [options]`);
   }
 
   const rawArgs = args.slice(1);
@@ -6404,6 +6551,9 @@ COMMANDS
   managed deploy-bundle [--out DIR] [--import SPECIFIER] [--force] [--json]
       Write trigger, Postgres DDL, env example, and README files for deployment.
 
+  managed probe [--action status|sync] [--root DIR] [--url URL] [--json]
+      Print or POST a managed trigger status/sync probe. Sync probes default to dry-run.
+
   managed sql-schema [--json]
       Print the Postgres DDL for the managed sources/assets/sync_runs registry.
 
@@ -6441,6 +6591,8 @@ EXAMPLES
   ${brand()} feishu managed base-template --json
   ${brand()} feishu managed trigger-template > feishu-managed-trigger.ts
   ${brand()} feishu managed deploy-bundle --out ./feishu-managed-deploy --json
+  ${brand()} feishu managed probe --action status --json
+  ${brand()} feishu managed probe --action sync --root ~/rbrain-feishu --url https://example.com/trigger --json
   ${brand()} feishu managed sql-schema > feishu-managed-registry.sql
   ${brand()} feishu managed provision-base --base-token appxxx --table-name "RBrain Managed Assets" --dry-run --json
   ${brand()} feishu managed sync --path ~/rbrain-feishu --space-id knowledge_space_xxx --dry-run --json
