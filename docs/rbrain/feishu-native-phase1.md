@@ -118,7 +118,8 @@ Phase 1 should preserve the useful behavior from `rbrain feishu aily push-space`
 
 - Deterministic asset titles are derived from source identity.
 - Content hashes decide whether an upload is needed.
-- Existing Aily assets are skipped unless replacement is explicitly requested.
+- Hash-matching registry assets are skipped locally.
+- Changed assets update the deterministic Aily asset title in place.
 - Secrets never appear in returned JSON, sync logs, Base rows, or committed files.
 
 ## Prototype Options
@@ -161,6 +162,54 @@ Risk:
 Start with Option B only if Miaoda platform access is blocked. Otherwise, prefer
 Option A and keep the local CLI as a fixture generator and debugging client.
 
+## Current Local Adapter Slice
+
+This branch implements the Option B fixture path:
+
+```bash
+rbrain feishu managed sync --path ~/rbrain-feishu --space-id knowledge_space_xxx --dry-run --json
+RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=... rbrain feishu managed sync --path ~/rbrain-feishu --space-id knowledge_space_xxx
+```
+
+The local adapter:
+
+- represents `sources`, `assets`, and `sync_runs` behind a small registry store
+- uses a JSON store under `.rbrain-managed/registry.json` by default
+- ignores `.rbrain-managed/` in generated mirror Git repos
+- works without a local RBrain database when `--path` is provided
+- uses registry `content_sha256` to skip unchanged assets
+- updates changed Aily assets by deterministic asset title
+- returns `base_mirror.preview` rows for the Feishu Base status table
+- optionally mirrors rows into a real Base table with `--base-token` and
+  `--base-table-id`
+- prints the Base field contract with `rbrain feishu managed base-template`
+- can create the status table in an existing Base with
+  `rbrain feishu managed provision-base`
+- prints Postgres DDL for the managed registry with
+  `rbrain feishu managed sql-schema`
+- includes a `PostgresManagedRegistryStore` implementation for the same
+  snapshot contract, ready to wire to a real Serverless PG / Miaoda runtime
+- lets `managed sync` select that Postgres store with
+  `--registry-store postgres`, `--registry-url`, or
+  `RBRAIN_FEISHU_MANAGED_DATABASE_URL`
+- adds `rbrain feishu managed status` so JSON or Postgres registry state can be
+  inspected before a full Aily push
+- extracts `runManagedSyncJob` so a Miaoda/server-function trigger can reuse
+  the same sync implementation instead of shelling out to the CLI
+- adds `runManagedTrigger` as the thin server-function adapter for `status` and
+  `sync` requests
+- adds `handleManagedTriggerRequest` for HTTP-style server functions with JSON
+  request/response handling and error redaction
+- prints a deployable TypeScript wrapper with
+  `rbrain feishu managed trigger-template`, importing the public
+  `gbrain/feishu-managed` adapter and naming only environment variables
+
+It is intentionally not the final managed backend. The sync path now talks to a
+registry store boundary, and both the default JSON store and the Postgres store
+implement that boundary. The next slice should run the Postgres store against
+the real Serverless PG / Miaoda table layer using the generated HTTP/scheduled
+trigger wrapper.
+
 ## Acceptance Criteria
 
 Phase 1 is complete when:
@@ -183,9 +232,19 @@ Local tests:
 - secret redaction
 - Aily create/update/skip mocked responses
 - Base mirror mocked responses
+- managed status JSON output for registry counts and latest run
+- direct `runManagedSyncJob` invocation without the CLI dispatcher
+- direct `runManagedTrigger` invocation for server-function `status` and `sync`
+  requests
+- HTTP trigger wrapper coverage for method rejection and PostgreSQL URL
+  redaction
+- generated trigger template coverage for public import path, scheduled/status
+  entrypoints, and no embedded secrets
 
 Manual platform checks:
 
+- `rbrain feishu managed status --registry-store postgres --registry-ensure-schema`
+  can read the target Serverless PG registry.
 - Miaoda scheduled/manual trigger runs.
 - Serverless PG tables are created and queryable.
 - Aily Knowledge Space receives an asset and reaches `successful`.
@@ -205,10 +264,13 @@ Manual platform checks:
 ## Next Implementation Tasks
 
 1. Confirm Miaoda platform access and runtime capabilities.
-2. Decide Option A or Option B for the first prototype.
-3. Create the three managed tables: `sources`, `assets`, `sync_runs`.
-4. Implement the minimal sync run state machine.
-5. Reuse or port deterministic Aily asset title generation.
-6. Add mocked Aily create/update/skip tests.
-7. Mirror asset status into a Base table.
-8. Document the prototype setup and manual verification flow.
+2. Execute or adapt the generated Postgres DDL in the target Serverless PG /
+   Miaoda table layer.
+3. Run `managed sync --registry-store postgres` against the target Serverless
+   PG connection.
+4. Deploy the generated `managed trigger-template` output as a real
+   manual/scheduled Miaoda trigger using the same registry store.
+5. Verify Aily Knowledge Space reaches `successful` for a managed sync asset.
+6. Verify the Aily custom agent answers using the managed asset.
+7. Decide whether `managed sync` remains a developer fixture or becomes the
+   canonical debugging client for the online control plane.

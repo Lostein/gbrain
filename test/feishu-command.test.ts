@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import matter from 'gray-matter';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withEnv } from './helpers/with-env.ts';
+import { defaultManagedRegistryPath, recordManagedSyncResult, saveManagedRegistry, createEmptyManagedRegistry } from '../src/core/feishu-managed-registry.ts';
 import {
   FEISHU_DOCTOR_CAPABILITY_CHECKS,
   FEISHU_MIRROR_DIRS,
@@ -46,6 +47,7 @@ import {
   buildMailTriageScript,
   buildMirrorReadme,
   buildMirrorGitignore,
+  buildManagedTriggerTemplate,
   buildMinutesSearchScript,
   buildMinutesSearchMarkdown,
   buildOkrCycleDetailMarkdown,
@@ -60,10 +62,15 @@ import {
   buildWikiSpacesMarkdown,
   buildWikiSpacesScript,
   collectAilyPushCandidates,
+  createManagedRegistryStoreHandle,
   expandPath,
+  handleManagedTriggerRequest,
   normalizeDocSlug,
   parseDocManifest,
   pushAilyKnowledgeSpace,
+  resolveManagedRegistryStoreConfig,
+  runManagedSyncJob,
+  runManagedTrigger,
 } from '../src/commands/feishu.ts';
 
 const cleanupPaths: string[] = [];
@@ -137,6 +144,7 @@ describe('rbrain feishu command helpers', () => {
     expect(buildMirrorGitignore()).toContain('.env\n');
     expect(buildMirrorGitignore()).toContain('.env.*\n');
     expect(buildMirrorGitignore()).toContain('!.env.*.example');
+    expect(buildMirrorGitignore()).toContain('.rbrain-managed/');
     expect(buildAilyEnvExample()).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_ID=knowledge_space_xxx');
     expect(buildAilyEnvExample()).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=');
     expect(buildAilyEnvExample()).not.toContain('DWL');
@@ -317,6 +325,16 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('aily push-space [--space-id knowledge_space_xxx]');
     expect(stdout).toContain('--env-file FILE');
     expect(stdout).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN');
+    expect(stdout).toContain('managed sync [--path DIR]');
+    expect(stdout).toContain('Prototype a Feishu-native managed asset registry');
+    expect(stdout).toContain('--registry-store json|postgres');
+    expect(stdout).toContain('--registry-url POSTGRES_URL');
+    expect(stdout).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
+    expect(stdout).toContain('managed status [--path DIR]');
+    expect(stdout).toContain('managed base-template [--json]');
+    expect(stdout).toContain('managed trigger-template [--json]');
+    expect(stdout).toContain('managed sql-schema [--json]');
+    expect(stdout).toContain('managed provision-base --base-token TOKEN');
   });
 
   test('Aily push candidates convert mirror markdown to deterministic txt assets', () => {
@@ -432,6 +450,559 @@ describe('rbrain feishu command helpers', () => {
     expect(result.skipped).toBe(2);
     expect(result.assets[0]!.action).toBe('skipped_existing');
     expect(calls.map((call) => call.method)).toEqual(['GET']);
+  });
+
+  test('managed sync dry-run works from --path without a local RBrain database', () => {
+    const root = makeTempDir('rbrain-feishu-managed-');
+    const dir = join(root, 'feishu', 'docs');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'roadmap.md'), '# Roadmap\n\nPlanning notes.\n', 'utf-8');
+
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'sync',
+        '--path',
+        root,
+        '--space-id',
+        'knowledge_space_test',
+        '--dry-run',
+        '--json',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      persisted: boolean;
+      registry_path: string;
+      registry_store: { kind: string; location: string };
+      sync_run: { assets_seen: number; assets_changed: number; assets_uploaded: number };
+      aily: { assets: Array<{ action: string; relative_path: string }> };
+      base_mirror: { rows: number };
+    };
+    expect(payload.persisted).toBe(false);
+    expect(payload.registry_path).toBe(join(root, '.rbrain-managed', 'registry.json'));
+    expect(payload.registry_store).toEqual({
+      kind: 'json',
+      location: payload.registry_path,
+    });
+    expect(payload.sync_run.assets_seen).toBe(2);
+    expect(payload.sync_run.assets_changed).toBe(2);
+    expect(payload.sync_run.assets_uploaded).toBe(0);
+    expect(payload.aily.assets.map((asset) => asset.action)).toEqual(['dry_run_create', 'dry_run_create']);
+    expect(payload.aily.assets[0]!.relative_path).toBe('feishu/rbrain-feishu-overview.md');
+    expect(payload.base_mirror.rows).toBe(2);
+    expect(existsSync(payload.registry_path)).toBe(false);
+  });
+
+  test('managed sync job can run without the CLI dispatcher', async () => {
+    const root = makeTempDir('rbrain-feishu-managed-job-');
+    const dir = join(root, 'feishu', 'docs');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'roadmap.md'), '# Roadmap\n\nPlanning notes.\n', 'utf-8');
+
+    const job = await runManagedSyncJob({
+      root,
+      env: {},
+      opts: {
+        path: root,
+        sourceId: 'feishu',
+        host: 'https://apaas.feishu.cn',
+        knowledgeSpaceId: 'knowledge_space_test',
+        tokenEnv: 'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN',
+        sourceUrlBase: 'https://rbrain.local/feishu-mirror',
+        replace: false,
+        dryRun: true,
+        json: true,
+        registryStore: 'json',
+        registryEnsureSchema: false,
+        trigger: 'manual',
+        sourceKind: 'manual',
+        sourceName: 'Feishu',
+      },
+    });
+
+    expect(job.payload.status).toBe('ok');
+    expect(job.payload.registry_store.kind).toBe('json');
+    expect(job.payload.sync_run.assets_seen).toBe(2);
+    expect(job.payload.aily.assets.map((asset) => asset.action)).toEqual(['dry_run_create', 'dry_run_create']);
+    expect(job.tokenSource).toBe('(not needed)');
+    expect(existsSync(defaultManagedRegistryPath(root))).toBe(false);
+  });
+
+  test('managed trigger can inspect registry status for a server function', async () => {
+    const root = makeTempDir('rbrain-feishu-managed-trigger-status-');
+    const seed = recordManagedSyncResult(createEmptyManagedRegistry('2026-06-07T10:00:00.000Z'), {
+      source: { id: 'feishu', kind: 'manual', name: 'Feishu' },
+      trigger: 'api',
+      started_at: '2026-06-07T10:00:00.000Z',
+      finished_at: '2026-06-07T10:00:01.000Z',
+      assets: [{
+        source_uri: 'feishu/docs/roadmap.md',
+        title: 'feishu/docs/roadmap.md',
+        content_sha256: 'f'.repeat(64),
+        normalized_text_uri: 'feishu/docs/roadmap.md',
+        aily_asset_title: 'rbrain-feishu-roadmap.txt',
+        aily_asset_id: 'knowledge_asset_1',
+        aily_status: 'successful',
+        action: 'created',
+      }],
+    });
+    saveManagedRegistry(defaultManagedRegistryPath(root), seed.snapshot);
+
+    const result = await runManagedTrigger({
+      request: {
+        action: 'status',
+        root,
+      },
+      env: {},
+    });
+
+    const statusPayload = result.result as {
+      counts: { assets: number };
+      latest_sync_run: { id: string } | null;
+    };
+    expect(result.action).toBe('status');
+    expect(result.status).toBe('ok');
+    expect(statusPayload.counts.assets).toBe(1);
+    expect(statusPayload.latest_sync_run?.id).toBe(seed.sync_run.id);
+  });
+
+  test('managed trigger can run dry-run sync for a server function', async () => {
+    const root = makeTempDir('rbrain-feishu-managed-trigger-sync-');
+    const dir = join(root, 'feishu', 'docs');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'roadmap.md'), '# Roadmap\n\nPlanning notes.\n', 'utf-8');
+
+    const result = await runManagedTrigger({
+      request: {
+        action: 'sync',
+        root,
+        trigger: 'api',
+        aily: {
+          knowledgeSpaceId: 'knowledge_space_test',
+          dryRun: true,
+        },
+      },
+      env: {},
+    });
+
+    const syncPayload = result.result as {
+      sync_run: { trigger: string; assets_seen: number };
+      aily: { assets: Array<{ action: string }> };
+    };
+    expect(result.action).toBe('sync');
+    expect(result.status).toBe('ok');
+    expect(syncPayload.sync_run.trigger).toBe('api');
+    expect(syncPayload.sync_run.assets_seen).toBe(2);
+    expect(syncPayload.aily.assets.map((asset) => asset.action)).toEqual(['dry_run_create', 'dry_run_create']);
+    expect(existsSync(defaultManagedRegistryPath(root))).toBe(false);
+  });
+
+  test('managed trigger HTTP handler runs dry-run sync from JSON body', async () => {
+    const root = makeTempDir('rbrain-feishu-managed-http-sync-');
+    const dir = join(root, 'feishu', 'docs');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'roadmap.md'), '# Roadmap\n\nPlanning notes.\n', 'utf-8');
+
+    const response = await handleManagedTriggerRequest({
+      request: {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'sync',
+          root,
+          aily: {
+            knowledgeSpaceId: 'knowledge_space_test',
+            dryRun: true,
+          },
+        }),
+      },
+      env: {},
+    });
+    const payload = JSON.parse(response.body) as {
+      action: string;
+      status: string;
+      result: { sync_run: { assets_seen: number } };
+    };
+
+    expect(response.status).toBe(200);
+    expect(response.headers['content-type']).toContain('application/json');
+    expect(payload.action).toBe('sync');
+    expect(payload.status).toBe('ok');
+    expect(payload.result.sync_run.assets_seen).toBe(2);
+  });
+
+  test('managed trigger HTTP handler rejects non-POST methods and redacts errors', async () => {
+    const methodResponse = await handleManagedTriggerRequest({
+      request: { method: 'GET' },
+      env: {},
+    });
+    expect(methodResponse.status).toBe(405);
+    expect(JSON.parse(methodResponse.body).error).toContain('GET');
+
+    const pgUrl = 'postgresql://user:secret-password@example.com:5432/rbrain';
+    const errorResponse = await handleManagedTriggerRequest({
+      request: {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'status',
+          registry: {
+            store: 'postgres',
+            url: pgUrl,
+          },
+        }),
+      },
+      env: {},
+      createStoreHandle: async () => {
+        throw new Error(`cannot connect to ${pgUrl}`);
+      },
+    });
+
+    expect(errorResponse.status).toBe(400);
+    expect(errorResponse.body).not.toContain('secret-password');
+    expect(errorResponse.body).not.toContain(pgUrl);
+  });
+
+  test('managed trigger template imports the public adapter without embedding secrets', () => {
+    const template = buildManagedTriggerTemplate({
+      importSpecifier: 'gbrain/feishu-managed',
+    });
+
+    expect(template).toContain('handleManagedTriggerRequest');
+    expect(template).toContain('from "gbrain/feishu-managed"');
+    expect(template).toContain('export default async function handler');
+    expect(template).toContain('export async function scheduled');
+    expect(template).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
+    expect(template).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_ID');
+    expect(template).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN');
+    expect(template).not.toContain('secret-token');
+    expect(template).not.toContain('postgresql://user:secret-password');
+  });
+
+  test('managed trigger-template prints a JSON deployment template', () => {
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'trigger-template',
+        '--json',
+        '--import',
+        'gbrain/feishu-managed',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      language: string;
+      import_specifier: string;
+      env: string[];
+      template: string;
+    };
+
+    expect(payload.language).toBe('typescript');
+    expect(payload.import_specifier).toBe('gbrain/feishu-managed');
+    expect(payload.env).toContain('RBRAIN_FEISHU_MIRROR_ROOT');
+    expect(payload.env).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
+    expect(payload.env).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_ID');
+    expect(payload.env).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN');
+    expect(payload.template).toContain('scheduled');
+    expect(payload.template).toContain('status');
+    expect(JSON.stringify(payload)).not.toContain('secret-token');
+    expect(JSON.stringify(payload)).not.toContain('postgresql://user:secret-password');
+  });
+
+  test('managed registry store config defaults to JSON and redacts Postgres URLs', async () => {
+    const root = makeTempDir('rbrain-feishu-managed-store-');
+    const jsonConfig = resolveManagedRegistryStoreConfig({
+      kind: 'json',
+      root,
+      ensureSchema: true,
+    });
+    expect(jsonConfig).toEqual({
+      kind: 'json',
+      registryPath: join(root, '.rbrain-managed', 'registry.json'),
+      location: join(root, '.rbrain-managed', 'registry.json'),
+      ensureSchema: false,
+    });
+
+    const pgUrl = 'postgresql://user:secret-password@example.com:5432/rbrain';
+    const pgConfig = resolveManagedRegistryStoreConfig({
+      kind: 'postgres',
+      root,
+      registryUrl: pgUrl,
+      ensureSchema: true,
+    });
+    expect(pgConfig.location).toBe('postgresql://***@example.com:5432/rbrain');
+    expect(pgConfig.location).not.toContain('secret-password');
+
+    let createdWithUrl = '';
+    let closed = false;
+    const fakeSql = (async () => []) as any;
+    fakeSql.unsafe = async () => [];
+    fakeSql.end = async () => { closed = true; };
+    fakeSql.json = (value: unknown) => ({ json: value });
+    const handle = await createManagedRegistryStoreHandle(pgConfig, (url) => {
+      createdWithUrl = url;
+      return fakeSql;
+    });
+
+    expect(createdWithUrl).toBe(pgUrl);
+    expect(handle.store.kind).toBe('postgres');
+    expect(handle.store.location).toBe(pgConfig.location);
+    await handle.close?.();
+    expect(closed).toBe(true);
+  });
+
+  test('managed status summarizes a local registry without Aily credentials', () => {
+    const root = makeTempDir('rbrain-feishu-managed-status-');
+    const candidates = collectAilyPushCandidates(root);
+    const seed = recordManagedSyncResult(createEmptyManagedRegistry('2026-06-07T10:00:00.000Z'), {
+      source: { id: 'feishu', kind: 'manual', name: 'Feishu' },
+      trigger: 'manual',
+      started_at: '2026-06-07T10:00:00.000Z',
+      finished_at: '2026-06-07T10:00:01.000Z',
+      assets: candidates.map((candidate, idx) => ({
+        source_uri: candidate.source_url,
+        title: candidate.relative_path,
+        content_sha256: candidate.content_sha256,
+        normalized_text_uri: candidate.relative_path,
+        aily_asset_title: candidate.title,
+        aily_asset_id: `knowledge_asset_${idx}`,
+        aily_status: idx === 0 ? 'successful' : 'learning',
+        action: 'created',
+      })),
+    });
+    saveManagedRegistry(defaultManagedRegistryPath(root), seed.snapshot);
+
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'status',
+        '--path',
+        root,
+        '--json',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      status: string;
+      registry_store: { kind: string; location: string };
+      counts: { sources: number; assets: number; sync_runs: number; base_mirror_rows: number };
+      latest_sync_run: { id: string; assets_seen: number };
+      aily_statuses: Record<string, number>;
+      base_mirror: { preview: unknown[] };
+    };
+
+    expect(payload.status).toBe('ok');
+    expect(payload.registry_store.kind).toBe('json');
+    expect(payload.registry_store.location).toBe(defaultManagedRegistryPath(root));
+    expect(payload.counts).toEqual({
+      sources: 1,
+      assets: 1,
+      sync_runs: 1,
+      base_mirror_rows: 1,
+    });
+    expect(payload.latest_sync_run.id).toBe(seed.sync_run.id);
+    expect(payload.latest_sync_run.assets_seen).toBe(1);
+    expect(payload.aily_statuses).toEqual({ successful: 1 });
+    expect(payload.base_mirror.preview).toHaveLength(1);
+  });
+
+  test('managed base-template prints the status table field contract', () => {
+    const proc = Bun.spawnSync({
+      cmd: ['bun', 'run', 'src/rbrain.ts', 'feishu', 'managed', 'base-template', '--json'],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      table_name: string;
+      fields: Array<{ name: string; type: string }>;
+    };
+    expect(payload.table_name).toBe('RBrain Managed Assets');
+    expect(payload.fields).toContainEqual({ name: 'Source URI', type: 'text' });
+    expect(payload.fields).toContainEqual({ name: 'Aily Status', type: 'text' });
+  });
+
+  test('managed sql-schema prints Postgres DDL for the registry tables', () => {
+    const proc = Bun.spawnSync({
+      cmd: ['bun', 'run', 'src/rbrain.ts', 'feishu', 'managed', 'sql-schema', '--json'],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      schema_version: number;
+      dialect: string;
+      sql: string;
+    };
+    expect(payload.schema_version).toBe(1);
+    expect(payload.dialect).toBe('postgres');
+    expect(payload.sql).toContain('feishu_managed_sources');
+    expect(payload.sql).toContain('feishu_managed_assets');
+    expect(payload.sql).toContain('feishu_managed_sync_runs');
+  });
+
+  test('managed provision-base creates the Base status table without leaking the token', () => {
+    const fakeBin = makeTempDir('rbrain-feishu-provision-base-bin-');
+    const logFile = join(fakeBin, 'calls.log');
+    const fakeLark = `#!/usr/bin/env bash
+set -euo pipefail
+printf '%q ' "$@" >> "${logFile}"
+printf '\\n' >> "${logFile}"
+if [ "\${2:-}" = "+table-create" ]; then
+  echo '{"data":{"table":{"table_id":"tbl_created"}}}'
+  exit 0
+fi
+echo '{"ok":true}'
+`;
+    writeFileSync(join(fakeBin, 'lark-cli'), fakeLark, { encoding: 'utf-8', mode: 0o755 });
+
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'provision-base',
+        '--base-token',
+        'base-secret-token',
+        '--table-name',
+        'RBrain Managed Assets',
+        '--json',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+      },
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    expect(proc.stdout.toString()).not.toContain('base-secret-token');
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      status: string;
+      table_id: string | null;
+      command: string[];
+      fields: Array<{ name: string; type: string }>;
+    };
+    expect(payload.status).toBe('ok');
+    expect(payload.table_id).toBe('tbl_created');
+    expect(payload.command).toContain('<redacted>');
+    expect(payload.fields).toContainEqual({ name: 'Source URI', type: 'text' });
+    const log = readFileSync(logFile, 'utf-8');
+    expect(log).toContain('+table-create');
+    expect(log).toContain('RBrain\\ Managed\\ Assets');
+  });
+
+  test('managed sync mirrors registry rows into Base by Source URI', () => {
+    const root = makeTempDir('rbrain-feishu-managed-base-');
+    const fakeBin = makeTempDir('rbrain-feishu-managed-base-bin-');
+    const logFile = join(fakeBin, 'calls.log');
+    const dir = join(root, 'feishu', 'docs');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'roadmap.md'), '# Roadmap\n\nPlanning notes.\n', 'utf-8');
+
+    const candidates = collectAilyPushCandidates(root);
+    const seed = recordManagedSyncResult(createEmptyManagedRegistry('2026-06-07T10:00:00.000Z'), {
+      source: { id: 'feishu', kind: 'manual', name: 'Feishu' },
+      trigger: 'seed',
+      started_at: '2026-06-07T10:00:00.000Z',
+      finished_at: '2026-06-07T10:00:01.000Z',
+      assets: candidates.map((candidate, idx) => ({
+        source_uri: candidate.source_url,
+        title: candidate.relative_path,
+        content_sha256: candidate.content_sha256,
+        normalized_text_uri: candidate.relative_path,
+        aily_asset_title: candidate.title,
+        aily_asset_id: `knowledge_asset_${idx}`,
+        aily_status: 'successful',
+        action: 'created',
+      })),
+    });
+    saveManagedRegistry(defaultManagedRegistryPath(root), seed.snapshot);
+
+    const fakeLark = `#!/usr/bin/env bash
+set -euo pipefail
+printf '%q ' "$@" >> "${logFile}"
+printf '\\n' >> "${logFile}"
+if [ "\${2:-}" = "+record-search" ]; then
+  if printf '%s\\n' "$*" | grep -q 'rbrain-feishu-overview'; then
+    echo '{"data":{"items":[{"record_id":"rec_existing"}]}}'
+  else
+    echo '{"data":{"items":[]}}'
+  fi
+  exit 0
+fi
+if [ "\${2:-}" = "+record-upsert" ]; then
+  echo '{"ok":true}'
+  exit 0
+fi
+echo '{"ok":true}'
+`;
+    writeFileSync(join(fakeBin, 'lark-cli'), fakeLark, { encoding: 'utf-8', mode: 0o755 });
+
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'sync',
+        '--path',
+        root,
+        '--space-id',
+        'knowledge_space_test',
+        '--base-token',
+        'base-secret-token',
+        '--base-table-id',
+        'tbl_test',
+        '--json',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+      },
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    expect(proc.stdout.toString()).not.toContain('base-secret-token');
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      base_mirror: { configured: boolean; created: number; updated: number; failed: number };
+    };
+    expect(payload.base_mirror.configured).toBe(true);
+    expect(payload.base_mirror.created).toBe(1);
+    expect(payload.base_mirror.updated).toBe(1);
+    expect(payload.base_mirror.failed).toBe(0);
+    const log = readFileSync(logFile, 'utf-8');
+    expect(log).toContain('+record-search');
+    expect(log).toContain('+record-upsert');
+    expect(log).toContain('--record-id rec_existing');
   });
 
   test('expandPath resolves tilde paths', () => {

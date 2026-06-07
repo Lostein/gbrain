@@ -25,6 +25,7 @@
     "./search/hybrid": "./src/core/search/hybrid.ts",
     "./search/expansion": "./src/core/search/expansion.ts",
     "./ai/gateway": "./src/core/ai/gateway.ts",
+    "./feishu-managed": "./src/commands/feishu.ts",
     "./extract": "./src/commands/extract.ts",
     "./ingestion": "./src/core/ingestion/index.ts",
     "./ingestion/test-harness": "./src/core/ingestion/test-harness.ts"

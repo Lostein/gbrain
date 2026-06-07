@@ -4,9 +4,32 @@ import { homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import matter from 'gray-matter';
+import postgres from 'postgres';
 import type { BrainEngine } from '../core/engine.ts';
+import { resolvePoolSize, resolvePrepare, resolveSessionTimeouts } from '../core/db.ts';
 import { assertValidSourceId } from '../core/source-id.ts';
 import { addSource as addBrainSource, SourceOpError } from '../core/sources-ops.ts';
+import { redactDeep, redactPgUrl } from '../core/url-redact.ts';
+import {
+  MANAGED_BASE_FIELD_NAMES,
+  FEISHU_MANAGED_SQL_SCHEMA_VERSION,
+  buildManagedBaseRecordFields,
+  buildManagedBaseTableFieldsJson,
+  buildManagedBaseMirrorRows,
+  buildManagedRegistrySqlSchema,
+  cloneManagedRegistry,
+  createJsonManagedRegistryStore,
+  createPostgresManagedRegistryStore,
+  defaultManagedRegistryPath,
+  recordManagedSyncResult,
+  type ManagedAssetObservation,
+  type ManagedBaseMirrorRow,
+  type ManagedRegistrySqlClient,
+  type ManagedRegistrySnapshot,
+  type ManagedRegistryStore,
+  type ManagedSourceKind,
+  type ManagedSyncRunRow,
+} from '../core/feishu-managed-registry.ts';
 
 export const FEISHU_MIRROR_DIRS = [
   'feishu/docs',
@@ -31,6 +54,17 @@ const AILY_DEFAULT_TOKEN_ENV = 'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN';
 const AILY_FALLBACK_TOKEN_ENV = 'AILY_KNOWLEDGE_SPACE_API_TOKEN';
 const AILY_DEFAULT_SPACE_ID_ENV = 'RBRAIN_AILY_KNOWLEDGE_SPACE_ID';
 const AILY_FALLBACK_SPACE_ID_ENV = 'AILY_KNOWLEDGE_SPACE_ID';
+const MANAGED_REGISTRY_STORE_ENV = 'RBRAIN_FEISHU_MANAGED_REGISTRY_STORE';
+const MANAGED_REGISTRY_DATABASE_URL_ENV = 'RBRAIN_FEISHU_MANAGED_DATABASE_URL';
+const MANAGED_TRIGGER_TEMPLATE_IMPORT = 'gbrain/feishu-managed';
+const MANAGED_TRIGGER_TEMPLATE_ENV = [
+  'RBRAIN_FEISHU_MIRROR_ROOT',
+  MANAGED_REGISTRY_DATABASE_URL_ENV,
+  AILY_DEFAULT_SPACE_ID_ENV,
+  AILY_DEFAULT_TOKEN_ENV,
+  'RBRAIN_FEISHU_MANAGED_BASE_TOKEN',
+  'RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID',
+] as const;
 const AILY_MAX_ASSET_BYTES = 30 * 1024 * 1024;
 const AILY_OVERVIEW_RELATIVE_PATH = 'feishu/rbrain-feishu-overview.md';
 
@@ -235,7 +269,7 @@ interface StatusOpts {
   json: boolean;
 }
 
-interface AilyPushSpaceOpts {
+export interface AilyPushSpaceOpts {
   path?: string;
   sourceId: string;
   host: string;
@@ -248,6 +282,39 @@ interface AilyPushSpaceOpts {
   dryRun: boolean;
   json: boolean;
 }
+
+export interface ManagedSyncOpts extends AilyPushSpaceOpts {
+  registryPath?: string;
+  registryStore: ManagedRegistryStoreKind;
+  registryUrl?: string;
+  registryEnsureSchema: boolean;
+  trigger: string;
+  sourceKind: ManagedSourceKind;
+  sourceName: string;
+  baseToken?: string;
+  baseTableId?: string;
+  baseAs?: string;
+}
+
+export interface ManagedRegistryStatusOpts {
+  path?: string;
+  sourceId: string;
+  registryPath?: string;
+  registryStore: ManagedRegistryStoreKind;
+  registryUrl?: string;
+  registryEnsureSchema: boolean;
+  json: boolean;
+}
+
+interface ManagedBaseProvisionOpts {
+  baseToken?: string;
+  tableName: string;
+  as?: string;
+  dryRun: boolean;
+  json: boolean;
+}
+
+export type ManagedRegistryStoreKind = 'json' | 'postgres';
 
 interface FeishuContext {
   engine?: BrainEngine;
@@ -372,7 +439,7 @@ export interface AilyPushSpaceResult {
 }
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
-type EnvLookup = Record<string, string | undefined>;
+export type EnvLookup = Record<string, string | undefined>;
 
 function brand(): string {
   return process.env.RBRAIN_MODE === '1' ? 'rbrain' : 'gbrain';
@@ -708,6 +775,13 @@ function parseAilyPositionals(args: string[]): string[] {
     '--env-file',
     '--source-url-base',
     '--limit',
+    '--registry',
+    '--trigger',
+    '--source-kind',
+    '--name',
+    '--base-token',
+    '--base-table-id',
+    '--base-as',
   ]);
   const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
@@ -762,6 +836,184 @@ function parseAilyPushSpace(
     dryRun: args.includes('--dry-run'),
     json: args.includes('--json'),
   };
+}
+
+function parseManagedSourceKind(input: string | undefined): ManagedSourceKind {
+  if (
+    input === 'doc' ||
+    input === 'drive' ||
+    input === 'wiki' ||
+    input === 'im' ||
+    input === 'base' ||
+    input === 'manual'
+  ) {
+    return input;
+  }
+  if (input === undefined) return 'manual';
+  throw new Error(`--source-kind must be one of doc, drive, wiki, im, base, manual`);
+}
+
+function parseManagedRegistryStoreKind(input: string | undefined): ManagedRegistryStoreKind {
+  if (input === undefined || input === 'json') return 'json';
+  if (input === 'postgres') return 'postgres';
+  throw new Error(`--registry-store must be one of json, postgres`);
+}
+
+function resolveManagedRegistryFlags(
+  args: string[],
+  env: EnvLookup,
+  opts: { requireRegistryUrl?: boolean; command: string },
+): Pick<ManagedRegistryStatusOpts, 'registryPath' | 'registryStore' | 'registryUrl' | 'registryEnsureSchema'> {
+  const registryUrl = parseFlagValue(args, '--registry-url') ?? env[MANAGED_REGISTRY_DATABASE_URL_ENV];
+  const explicitStore = parseFlagValue(args, '--registry-store') ?? env[MANAGED_REGISTRY_STORE_ENV];
+  const registryStore = parseManagedRegistryStoreKind(explicitStore ?? (registryUrl ? 'postgres' : 'json'));
+  if (registryStore === 'postgres' && !registryUrl && opts.requireRegistryUrl !== false) {
+    throw new Error(
+      `${brand()} feishu managed ${opts.command} with --registry-store postgres requires --registry-url ` +
+      `or ${MANAGED_REGISTRY_DATABASE_URL_ENV}.`,
+    );
+  }
+  if (explicitStore === 'json' && registryUrl) {
+    throw new Error(`${brand()} feishu managed ${opts.command} cannot combine --registry-store json with --registry-url.`);
+  }
+  return {
+    registryPath: parseFlagValue(args, '--registry') ? expandPath(parseFlagValue(args, '--registry')!) : undefined,
+    registryStore,
+    registryUrl,
+    registryEnsureSchema: args.includes('--registry-ensure-schema'),
+  };
+}
+
+function parseManagedRegistryStatus(
+  args: string[],
+  env: EnvLookup = process.env,
+  opts: { requireRegistryUrl?: boolean } = {},
+): ManagedRegistryStatusOpts {
+  return {
+    path: parseFlagValue(args, '--path') ? expandPath(parseFlagValue(args, '--path')!) : undefined,
+    sourceId: parseFlagValue(args, '--source-id') ?? 'feishu',
+    ...resolveManagedRegistryFlags(args, env, { ...opts, command: 'status' }),
+    json: args.includes('--json'),
+  };
+}
+
+function parseManagedSync(
+  args: string[],
+  env: EnvLookup = process.env,
+  opts: { requireKnowledgeSpaceId?: boolean; requireRegistryUrl?: boolean } = {},
+): ManagedSyncOpts {
+  const aily = parseAilyPushSpace(args, env, opts);
+  return {
+    ...aily,
+    ...resolveManagedRegistryFlags(args, env, { ...opts, command: 'sync' }),
+    trigger: parseFlagValue(args, '--trigger') ?? 'manual',
+    sourceKind: parseManagedSourceKind(parseFlagValue(args, '--source-kind')),
+    sourceName: parseFlagValue(args, '--name') ?? 'Feishu',
+    baseToken: parseFlagValue(args, '--base-token'),
+    baseTableId: parseFlagValue(args, '--base-table-id'),
+    baseAs: parseFlagValue(args, '--base-as'),
+  };
+}
+
+function parseManagedBaseProvision(args: string[]): ManagedBaseProvisionOpts {
+  return {
+    baseToken: parseFlagValue(args, '--base-token'),
+    tableName: parseFlagValue(args, '--table-name') ?? parseFlagValue(args, '--name') ?? 'RBrain Managed Assets',
+    as: parseFlagValue(args, '--as'),
+    dryRun: args.includes('--dry-run'),
+    json: args.includes('--json'),
+  };
+}
+
+export interface ManagedRegistryStoreConfig {
+  kind: ManagedRegistryStoreKind;
+  registryPath: string;
+  location: string;
+  postgresUrl?: string;
+  ensureSchema: boolean;
+}
+
+export interface ManagedRegistryStoreHandle {
+  store: ManagedRegistryStore;
+  close?: () => Promise<void>;
+}
+
+export type ManagedPostgresSqlClient = ManagedRegistrySqlClient & { end?: () => Promise<unknown> };
+export type ManagedPostgresFactory = (url: string) => ManagedPostgresSqlClient;
+
+export function resolveManagedRegistryStoreConfig(opts: {
+  kind: ManagedRegistryStoreKind;
+  root: string;
+  registryPath?: string;
+  registryUrl?: string;
+  ensureSchema: boolean;
+}): ManagedRegistryStoreConfig {
+  const registryPath = opts.registryPath ?? defaultManagedRegistryPath(opts.root);
+  if (opts.kind === 'json') {
+    return {
+      kind: 'json',
+      registryPath,
+      location: registryPath,
+      ensureSchema: false,
+    };
+  }
+  if (!opts.registryUrl) {
+    throw new Error(`${brand()} feishu managed registry with postgres store needs a database URL.`);
+  }
+  return {
+    kind: 'postgres',
+    registryPath,
+    location: redactPgUrl(opts.registryUrl),
+    postgresUrl: opts.registryUrl,
+    ensureSchema: opts.ensureSchema,
+  };
+}
+
+function createManagedPostgresSqlClient(url: string): ManagedPostgresSqlClient {
+  const prepare = resolvePrepare(url);
+  const timeouts = resolveSessionTimeouts();
+  const clientOpts: Record<string, unknown> = {
+    max: resolvePoolSize(),
+    idle_timeout: 20,
+    connect_timeout: 10,
+    types: {
+      bigint: postgres.BigInt,
+    },
+    onnotice: process.env.GBRAIN_PG_NOTICES === '1' ? undefined : () => {},
+  };
+  if (Object.keys(timeouts).length > 0) clientOpts.connection = timeouts;
+  if (typeof prepare === 'boolean') clientOpts.prepare = prepare;
+  return postgres(url, clientOpts) as unknown as ManagedPostgresSqlClient;
+}
+
+export async function createManagedRegistryStoreHandle(
+  config: ManagedRegistryStoreConfig,
+  postgresFactory: ManagedPostgresFactory = createManagedPostgresSqlClient,
+): Promise<ManagedRegistryStoreHandle> {
+  if (config.kind === 'json') {
+    return { store: createJsonManagedRegistryStore(config.registryPath) };
+  }
+
+  const sql = postgresFactory(config.postgresUrl!);
+  const store = createPostgresManagedRegistryStore(sql, config.location);
+  if (config.ensureSchema) await store.ensureSchema();
+  return {
+    store,
+    close: async () => {
+      await sql.end?.();
+    },
+  };
+}
+
+async function resolveManagedRegistryRoot(
+  engine: BrainEngine | undefined,
+  opts: { sourceId: string; path?: string; registryStore: ManagedRegistryStoreKind },
+  command: string,
+): Promise<string> {
+  if (opts.path) return opts.path;
+  if (engine) return resolveMirrorRoot(engine, opts);
+  if (opts.registryStore === 'postgres') return process.cwd();
+  throw new Error(`${brand()} feishu managed ${command} needs --path DIR when no local RBrain database is connected.`);
 }
 
 function parseJsonObject(input: unknown): Record<string, unknown> {
@@ -1595,6 +1847,7 @@ export function buildMirrorGitignore(): string {
   return `.env
 .env.*
 !.env.*.example
+.rbrain-managed/
 .DS_Store
 *.log
 `;
@@ -4446,14 +4699,16 @@ export async function pushAilyKnowledgeSpace(opts: {
   limit?: number;
   replace?: boolean;
   dryRun?: boolean;
+  candidates?: AilyPushCandidate[];
+  dryRunExistingAssets?: AilyAssetRow[];
   fetchImpl?: FetchLike;
 }): Promise<AilyPushSpaceResult> {
-  const candidates = collectAilyPushCandidates(opts.root, {
+  const candidates = opts.candidates ?? collectAilyPushCandidates(opts.root, {
     limit: opts.limit,
     sourceUrlBase: opts.sourceUrlBase,
   });
   const existingAssets = opts.dryRun
-    ? []
+    ? opts.dryRunExistingAssets ?? []
     : await listAilyKnowledgeAssets({
         host: opts.host,
         knowledgeSpaceId: opts.knowledgeSpaceId,
@@ -4537,6 +4792,1035 @@ export async function pushAilyKnowledgeSpace(opts: {
     failed,
     assets,
   };
+}
+
+function summarizeAilyPushAssets(opts: {
+  root: string;
+  host: string;
+  knowledgeSpaceId: string;
+  dryRun: boolean;
+  replace: boolean;
+  assets: AilyPushItemResult[];
+}): AilyPushSpaceResult {
+  const created = opts.assets.filter((asset) => asset.action === 'created').length;
+  const updated = opts.assets.filter((asset) => asset.action === 'updated').length;
+  const failed = opts.assets.filter((asset) => asset.action === 'failed').length;
+  const skipped = opts.assets.length - created - updated - failed;
+  return {
+    status: failed > 0 ? 'partial' : 'ok',
+    host: opts.host,
+    knowledge_space_id: opts.knowledgeSpaceId,
+    path: opts.root,
+    dry_run: opts.dryRun,
+    replace: opts.replace,
+    candidates: opts.assets.length,
+    created,
+    updated,
+    skipped,
+    failed,
+    assets: opts.assets,
+  };
+}
+
+function registryAilyAssets(snapshot: ManagedRegistrySnapshot): Map<string, AilyAssetRow> {
+  const out = new Map<string, AilyAssetRow>();
+  for (const asset of snapshot.assets) {
+    if (!asset.aily_asset_id) continue;
+    out.set(asset.aily_asset_title, {
+      knowledge_asset_id: asset.aily_asset_id,
+      name: asset.aily_asset_title,
+      status: asset.aily_status ?? undefined,
+    });
+  }
+  return out;
+}
+
+function managedObservationFromAilyAsset(asset: AilyPushItemResult): ManagedAssetObservation {
+  return {
+    source_uri: asset.source_url,
+    title: asset.relative_path,
+    content_sha256: asset.content_sha256,
+    normalized_text_uri: asset.relative_path,
+    aily_asset_title: asset.title,
+    aily_asset_id: asset.knowledge_asset_id ?? null,
+    aily_status: asset.asset_status ?? null,
+    action: asset.action,
+    error: asset.error,
+  };
+}
+
+function buildManagedSyncPayload(opts: {
+  registryPath: string;
+  registryStore: ManagedRegistryStore;
+  persisted: boolean;
+  syncRun: ManagedSyncRunRow;
+  push: AilyPushSpaceResult;
+  baseRows: ManagedBaseMirrorRow[];
+  baseWrite: ManagedBaseMirrorWriteResult;
+}) {
+  return {
+    status: opts.push.status,
+    dry_run: opts.push.dry_run,
+    persisted: opts.persisted,
+    registry_path: opts.registryPath,
+    registry_store: {
+      kind: opts.registryStore.kind,
+      location: opts.registryStore.location,
+    },
+    sync_run: opts.syncRun,
+    aily: opts.push,
+    base_mirror: {
+      status: opts.baseWrite.status,
+      configured: opts.baseWrite.configured,
+      dry_run: opts.baseWrite.dry_run,
+      rows: opts.baseRows.length,
+      created: opts.baseWrite.created,
+      updated: opts.baseWrite.updated,
+      failed: opts.baseWrite.failed,
+      errors: opts.baseWrite.errors,
+      preview: opts.baseRows.slice(0, 20),
+    },
+  };
+}
+
+function printManagedSyncResult(payload: ReturnType<typeof buildManagedSyncPayload>): void {
+  console.log(`Feishu managed sync: ${payload.status}`);
+  console.log(`  registry: ${payload.registry_path}${payload.persisted ? '' : ' (dry-run, not written)'}`);
+  console.log(
+    `  run: ${payload.sync_run.id} ${payload.sync_run.status}, ` +
+    `${payload.sync_run.assets_seen} seen, ${payload.sync_run.assets_changed} changed, ` +
+    `${payload.sync_run.assets_uploaded} uploaded`,
+  );
+  console.log(
+    `  Aily: ${payload.aily.created} created, ${payload.aily.updated} updated, ` +
+    `${payload.aily.skipped} skipped, ${payload.aily.failed} failed`,
+  );
+  console.log(
+    `  Base mirror: ${payload.base_mirror.status}, ${payload.base_mirror.rows} rows, ` +
+    `${payload.base_mirror.created} created, ${payload.base_mirror.updated} updated, ` +
+    `${payload.base_mirror.failed} failed`,
+  );
+  if (payload.sync_run.error_summary) console.log(`  errors: ${payload.sync_run.error_summary}`);
+}
+
+function managedSyncRunSortKey(run: ManagedSyncRunRow): string {
+  return run.started_at || run.finished_at || '';
+}
+
+function latestManagedSyncRun(snapshot: ManagedRegistrySnapshot): ManagedSyncRunRow | null {
+  return snapshot.sync_runs
+    .slice()
+    .sort((a, b) => managedSyncRunSortKey(b).localeCompare(managedSyncRunSortKey(a)))[0] ?? null;
+}
+
+function countManagedAilyStatuses(snapshot: ManagedRegistrySnapshot): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const asset of snapshot.assets) {
+    const status = asset.aily_status || 'unknown';
+    counts[status] = (counts[status] ?? 0) + 1;
+  }
+  return Object.fromEntries(Object.entries(counts).sort(([a], [b]) => a.localeCompare(b)));
+}
+
+function buildManagedRegistryStatusPayload(opts: {
+  snapshot: ManagedRegistrySnapshot;
+  registryStore: ManagedRegistryStore;
+  schemaEnsured: boolean;
+}) {
+  const baseRows = buildManagedBaseMirrorRows(opts.snapshot);
+  return {
+    status: 'ok' as const,
+    registry_store: {
+      kind: opts.registryStore.kind,
+      location: opts.registryStore.location,
+      schema_ensured: opts.schemaEnsured,
+    },
+    counts: {
+      sources: opts.snapshot.sources.length,
+      assets: opts.snapshot.assets.length,
+      sync_runs: opts.snapshot.sync_runs.length,
+      base_mirror_rows: baseRows.length,
+    },
+    aily_statuses: countManagedAilyStatuses(opts.snapshot),
+    latest_sync_run: latestManagedSyncRun(opts.snapshot),
+    updated_at: opts.snapshot.updated_at,
+    base_mirror: {
+      preview: baseRows.slice(0, 20),
+    },
+  };
+}
+
+function printManagedRegistryStatusResult(payload: ReturnType<typeof buildManagedRegistryStatusPayload>): void {
+  console.log('Feishu managed registry status: ok');
+  console.log(`  registry: ${payload.registry_store.kind} ${payload.registry_store.location}`);
+  if (payload.registry_store.schema_ensured) console.log('  schema: ensured');
+  console.log(
+    `  rows: ${payload.counts.sources} sources, ${payload.counts.assets} assets, ` +
+    `${payload.counts.sync_runs} sync runs`,
+  );
+  const latest = payload.latest_sync_run;
+  if (latest) {
+    console.log(
+      `  latest: ${latest.id} ${latest.status}, ${latest.assets_seen} seen, ` +
+      `${latest.assets_uploaded} uploaded`,
+    );
+  } else {
+    console.log('  latest: none');
+  }
+  const statuses = Object.entries(payload.aily_statuses)
+    .map(([status, count]) => `${status}=${count}`)
+    .join(', ');
+  console.log(`  Aily statuses: ${statuses || 'none'}`);
+  console.log(`  Base preview rows: ${payload.counts.base_mirror_rows}`);
+}
+
+export interface ManagedRegistryStatusJobInput {
+  root: string;
+  opts: ManagedRegistryStatusOpts;
+  storeConfig?: ManagedRegistryStoreConfig;
+  createStoreHandle?: typeof createManagedRegistryStoreHandle;
+}
+
+export async function runManagedRegistryStatusJob(input: ManagedRegistryStatusJobInput) {
+  const storeConfig = input.storeConfig ?? resolveManagedRegistryStoreConfig({
+    kind: input.opts.registryStore,
+    root: input.root,
+    registryPath: input.opts.registryPath,
+    registryUrl: input.opts.registryUrl,
+    ensureSchema: input.opts.registryEnsureSchema,
+  });
+  const createStoreHandle = input.createStoreHandle ?? createManagedRegistryStoreHandle;
+  const registryHandle = await createStoreHandle(storeConfig);
+  try {
+    const snapshot = await registryHandle.store.load();
+    return buildManagedRegistryStatusPayload({
+      snapshot,
+      registryStore: registryHandle.store,
+      schemaEnsured: storeConfig.ensureSchema,
+    });
+  } finally {
+    await registryHandle.close?.();
+  }
+}
+
+interface ManagedBaseMirrorWriteResult {
+  status: 'preview' | 'ok' | 'partial';
+  configured: boolean;
+  dry_run: boolean;
+  created: number;
+  updated: number;
+  failed: number;
+  errors: string[];
+}
+
+interface ManagedBaseProvisionResult {
+  status: 'dry_run' | 'ok' | 'failed';
+  table_name: string;
+  table_id: string | null;
+  fields: ReturnType<typeof buildManagedBaseTableFieldsJson>;
+  command: string[];
+  error?: string;
+}
+
+function withOptionalFlag(args: string[], name: string, value: string | undefined): string[] {
+  return value ? [...args, name, value] : args;
+}
+
+function redactCommandError(input: string, secrets: string[]): string {
+  let out = input;
+  for (const secret of secrets) {
+    if (secret) out = out.split(secret).join('<redacted>');
+  }
+  return out.slice(0, 500);
+}
+
+function extractBaseRecordIdFromSearch(input: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input);
+  } catch {
+    return null;
+  }
+
+  const visit = (value: unknown): string | null => {
+    if (!value || typeof value !== 'object') return null;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = visit(item);
+        if (found) return found;
+      }
+      return null;
+    }
+    const obj = value as Record<string, unknown>;
+    for (const key of ['record_id', 'recordId', 'id']) {
+      const candidate = obj[key];
+      if (typeof candidate === 'string' && /^rec[a-zA-Z0-9_]+/.test(candidate)) return candidate;
+    }
+    for (const child of Object.values(obj)) {
+      const found = visit(child);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  return visit(parsed);
+}
+
+function extractBaseTableId(input: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input);
+  } catch {
+    return null;
+  }
+
+  const visit = (value: unknown): string | null => {
+    if (!value || typeof value !== 'object') return null;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = visit(item);
+        if (found) return found;
+      }
+      return null;
+    }
+    const obj = value as Record<string, unknown>;
+    for (const key of ['table_id', 'tableId', 'id']) {
+      const candidate = obj[key];
+      if (typeof candidate === 'string' && /^tbl[a-zA-Z0-9_]+/.test(candidate)) return candidate;
+    }
+    for (const child of Object.values(obj)) {
+      const found = visit(child);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  return visit(parsed);
+}
+
+function redactArgv(argv: string[], secrets: string[]): string[] {
+  return argv.map((arg) => {
+    let out = arg;
+    for (const secret of secrets) {
+      if (secret) out = out.split(secret).join('<redacted>');
+    }
+    return out;
+  });
+}
+
+function provisionManagedBaseTable(
+  opts: ManagedBaseProvisionOpts,
+  commandImpl: typeof runLocalCommand = runLocalCommand,
+): ManagedBaseProvisionResult {
+  const fields = buildManagedBaseTableFieldsJson();
+  const token = opts.baseToken ?? '<base-token>';
+  let argv = withOptionalFlag([
+    'lark-cli',
+    'base',
+    '+table-create',
+    '--base-token',
+    token,
+    '--name',
+    opts.tableName,
+    '--fields',
+    JSON.stringify(fields),
+    '--format',
+    'json',
+  ], '--as', opts.as);
+  const redactedCommand = redactArgv(argv, [opts.baseToken ?? '']);
+  if (opts.dryRun) {
+    return {
+      status: 'dry_run',
+      table_name: opts.tableName,
+      table_id: null,
+      fields,
+      command: redactedCommand,
+    };
+  }
+  if (!opts.baseToken) {
+    throw new Error(`${brand()} feishu managed provision-base requires --base-token unless --dry-run is set.`);
+  }
+
+  argv = redactedCommand.map((arg) => arg === '<redacted>' ? opts.baseToken! : arg);
+  const result = commandImpl(argv);
+  if (!result.ok) {
+    return {
+      status: 'failed',
+      table_name: opts.tableName,
+      table_id: null,
+      fields,
+      command: redactedCommand,
+      error: redactCommandError(result.stderr || result.stdout, [opts.baseToken]),
+    };
+  }
+
+  return {
+    status: 'ok',
+    table_name: opts.tableName,
+    table_id: extractBaseTableId(result.stdout),
+    fields,
+    command: redactedCommand,
+  };
+}
+
+function printManagedBaseTemplate(json: boolean): void {
+  const payload = {
+    table_name: 'RBrain Managed Assets',
+    fields: buildManagedBaseTableFieldsJson(),
+  };
+  if (json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  console.log('RBrain managed Base template');
+  console.log(`  table: ${payload.table_name}`);
+  for (const field of payload.fields) console.log(`  - ${field.name} (${field.type})`);
+}
+
+function printManagedBaseProvisionResult(payload: ManagedBaseProvisionResult): void {
+  console.log(`Feishu managed Base provision: ${payload.status}`);
+  console.log(`  table: ${payload.table_name}${payload.table_id ? ` (${payload.table_id})` : ''}`);
+  console.log(`  fields: ${payload.fields.length}`);
+  if (payload.error) console.log(`  error: ${payload.error}`);
+}
+
+function mirrorManagedBaseRows(opts: {
+  rows: ManagedBaseMirrorRow[];
+  baseToken?: string;
+  tableId?: string;
+  as?: string;
+  dryRun: boolean;
+  commandImpl?: typeof runLocalCommand;
+}): ManagedBaseMirrorWriteResult {
+  const configured = Boolean(opts.baseToken && opts.tableId);
+  if (!configured || opts.dryRun) {
+    return {
+      status: configured ? 'ok' : 'preview',
+      configured,
+      dry_run: opts.dryRun,
+      created: 0,
+      updated: 0,
+      failed: 0,
+      errors: [],
+    };
+  }
+
+  const commandImpl = opts.commandImpl ?? runLocalCommand;
+  let created = 0;
+  let updated = 0;
+  let failed = 0;
+  const errors: string[] = [];
+  const baseArgs = ['lark-cli', 'base'];
+  for (const row of opts.rows) {
+    const searchArgs = withOptionalFlag([
+      ...baseArgs,
+      '+record-search',
+      '--base-token',
+      opts.baseToken!,
+      '--table-id',
+      opts.tableId!,
+      '--keyword',
+      row.source_uri,
+      '--search-field',
+      MANAGED_BASE_FIELD_NAMES.sourceUri,
+      '--field-id',
+      MANAGED_BASE_FIELD_NAMES.sourceUri,
+      '--limit',
+      '1',
+      '--format',
+      'json',
+    ], '--as', opts.as);
+    const search = commandImpl(searchArgs);
+    if (!search.ok) {
+      failed++;
+      errors.push(`${row.source_uri}: search failed: ${redactCommandError(search.stderr || search.stdout, [opts.baseToken!])}`);
+      continue;
+    }
+
+    const recordId = extractBaseRecordIdFromSearch(search.stdout);
+    const fields = buildManagedBaseRecordFields(row);
+    let upsertArgs = withOptionalFlag([
+      ...baseArgs,
+      '+record-upsert',
+      '--base-token',
+      opts.baseToken!,
+      '--table-id',
+      opts.tableId!,
+      '--json',
+      JSON.stringify(fields),
+    ], '--as', opts.as);
+    upsertArgs = withOptionalFlag(upsertArgs, '--record-id', recordId ?? undefined);
+    const upsert = commandImpl(upsertArgs);
+    if (!upsert.ok) {
+      failed++;
+      errors.push(`${row.source_uri}: upsert failed: ${redactCommandError(upsert.stderr || upsert.stdout, [opts.baseToken!])}`);
+      continue;
+    }
+    if (recordId) updated++;
+    else created++;
+  }
+
+  return {
+    status: failed > 0 ? 'partial' : 'ok',
+    configured,
+    dry_run: false,
+    created,
+    updated,
+    failed,
+    errors,
+  };
+}
+
+type ManagedBaseMirrorRowsImpl = typeof mirrorManagedBaseRows;
+
+export interface ManagedSyncJobInput {
+  root: string;
+  opts: ManagedSyncOpts;
+  env: EnvLookup;
+  storeConfig?: ManagedRegistryStoreConfig;
+  createStoreHandle?: typeof createManagedRegistryStoreHandle;
+  mirrorBaseRows?: ManagedBaseMirrorRowsImpl;
+}
+
+export async function runManagedSyncJob(input: ManagedSyncJobInput) {
+  const storeConfig = input.storeConfig ?? resolveManagedRegistryStoreConfig({
+    kind: input.opts.registryStore,
+    root: input.root,
+    registryPath: input.opts.registryPath,
+    registryUrl: input.opts.registryUrl,
+    ensureSchema: input.opts.registryEnsureSchema,
+  });
+  const registryPath = storeConfig.location;
+  const createStoreHandle = input.createStoreHandle ?? createManagedRegistryStoreHandle;
+  const registryHandle = await createStoreHandle(storeConfig);
+  const registryStore = registryHandle.store;
+  try {
+    const registry = await registryStore.load();
+    const candidates = collectAilyPushCandidates(input.root, {
+      limit: input.opts.limit,
+      sourceUrlBase: input.opts.sourceUrlBase,
+    });
+    const previousByTitle = new Map(registry.assets.map((asset) => [asset.aily_asset_title, asset]));
+    const unchanged = new Map<string, AilyPushItemResult>();
+    const pushCandidates: AilyPushCandidate[] = [];
+    const knownExisting = registryAilyAssets(registry);
+    const startedAt = new Date().toISOString();
+
+    for (const candidate of candidates) {
+      const previous = previousByTitle.get(candidate.title);
+      const sameHash = previous?.content_sha256 === candidate.content_sha256;
+      if (sameHash && previous?.aily_asset_id && !input.opts.replace) {
+        unchanged.set(candidate.relative_path, {
+          ...candidate,
+          action: input.opts.dryRun ? 'dry_run_skip_existing' : 'skipped_existing',
+          knowledge_asset_id: previous.aily_asset_id,
+          asset_status: previous.aily_status ?? undefined,
+        });
+      } else {
+        pushCandidates.push(candidate);
+      }
+    }
+
+    const token = input.opts.dryRun || pushCandidates.length === 0
+      ? { token: '', source: '(not needed)' }
+      : resolveAilyApiToken(input.opts.tokenEnv, input.env);
+    const pushed = pushCandidates.length === 0
+      ? summarizeAilyPushAssets({
+          root: input.root,
+          host: input.opts.host,
+          knowledgeSpaceId: input.opts.knowledgeSpaceId,
+          dryRun: input.opts.dryRun,
+          replace: input.opts.replace,
+          assets: [],
+        })
+      : await pushAilyKnowledgeSpace({
+          root: input.root,
+          host: input.opts.host,
+          knowledgeSpaceId: input.opts.knowledgeSpaceId,
+          token: token.token,
+          sourceUrlBase: input.opts.sourceUrlBase,
+          replace: true,
+          dryRun: input.opts.dryRun,
+          candidates: pushCandidates,
+          dryRunExistingAssets: Array.from(knownExisting.values()),
+        });
+    const pushedByPath = new Map(pushed.assets.map((asset) => [asset.relative_path, asset]));
+    const assets = candidates.map((candidate) => {
+      const existing = unchanged.get(candidate.relative_path);
+      if (existing) return existing;
+      const pushedAsset = pushedByPath.get(candidate.relative_path);
+      if (!pushedAsset) {
+        return {
+          ...candidate,
+          action: 'failed' as const,
+          error: 'Candidate was not returned by managed Aily push.',
+        };
+      }
+      return pushedAsset;
+    });
+    const combinedPush = summarizeAilyPushAssets({
+      root: input.root,
+      host: input.opts.host,
+      knowledgeSpaceId: input.opts.knowledgeSpaceId,
+      dryRun: input.opts.dryRun,
+      replace: input.opts.replace,
+      assets,
+    });
+
+    const finishedAt = new Date().toISOString();
+    const record = recordManagedSyncResult(input.opts.dryRun ? cloneManagedRegistry(registry) : registry, {
+      source: {
+        id: input.opts.sourceId,
+        kind: input.opts.sourceKind,
+        name: input.opts.sourceName,
+        config_json: {
+          mirror_path: input.root,
+          registry_path: registryPath,
+          registry_store: storeConfig.kind,
+          aily_host: input.opts.host,
+          aily_knowledge_space_id: input.opts.knowledgeSpaceId,
+          source_url_base: input.opts.sourceUrlBase,
+        },
+      },
+      trigger: input.opts.trigger,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      assets: assets.map(managedObservationFromAilyAsset),
+    });
+    if (!input.opts.dryRun) await registryStore.save(record.snapshot);
+    const baseRows = buildManagedBaseMirrorRows(record.snapshot);
+    const mirrorBaseRows = input.mirrorBaseRows ?? mirrorManagedBaseRows;
+    const baseWrite = mirrorBaseRows({
+      rows: baseRows,
+      baseToken: input.opts.baseToken,
+      tableId: input.opts.baseTableId,
+      as: input.opts.baseAs,
+      dryRun: input.opts.dryRun,
+    });
+    const payload = buildManagedSyncPayload({
+      registryPath,
+      registryStore,
+      persisted: !input.opts.dryRun,
+      syncRun: record.sync_run,
+      push: combinedPush,
+      baseRows,
+      baseWrite,
+    });
+
+    return {
+      payload,
+      tokenSource: token.source,
+      pushCandidates: pushCandidates.length,
+    };
+  } finally {
+    await registryHandle.close?.();
+  }
+}
+
+export type ManagedTriggerAction = 'status' | 'sync';
+
+export interface ManagedTriggerRequest {
+  action?: ManagedTriggerAction;
+  root?: string;
+  sourceId?: string;
+  trigger?: string;
+  registry?: {
+    store?: ManagedRegistryStoreKind;
+    path?: string;
+    url?: string;
+    ensureSchema?: boolean;
+  };
+  aily?: {
+    host?: string;
+    knowledgeSpaceId?: string;
+    tokenEnv?: string;
+    sourceUrlBase?: string;
+    limit?: number;
+    replace?: boolean;
+    dryRun?: boolean;
+  };
+  source?: {
+    kind?: ManagedSourceKind;
+    name?: string;
+  };
+  base?: {
+    token?: string;
+    tableId?: string;
+    as?: string;
+  };
+}
+
+export interface ManagedTriggerInput {
+  request?: ManagedTriggerRequest;
+  env?: EnvLookup;
+  createStoreHandle?: typeof createManagedRegistryStoreHandle;
+  mirrorBaseRows?: ManagedBaseMirrorRowsImpl;
+}
+
+export interface ManagedTriggerHttpRequest {
+  method?: string;
+  body?: string | ManagedTriggerRequest | null;
+}
+
+export interface ManagedTriggerHttpResponse {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+}
+
+export interface ManagedTriggerTemplateOpts {
+  importSpecifier?: string;
+}
+
+interface ManagedTriggerTemplateCliOpts extends ManagedTriggerTemplateOpts {
+  json: boolean;
+}
+
+function parseManagedTriggerHttpBody(input: string | ManagedTriggerRequest | null | undefined): ManagedTriggerRequest {
+  if (input === undefined || input === null || input === '') return {};
+  if (typeof input !== 'string') return input;
+  const parsed = JSON.parse(input) as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('managed trigger request body must be a JSON object.');
+  }
+  return parsed as ManagedTriggerRequest;
+}
+
+function managedTriggerJsonResponse(status: number, body: unknown): ManagedTriggerHttpResponse {
+  return {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+    body: JSON.stringify(body),
+  };
+}
+
+function managedTriggerHttpErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const pgRedacted = redactDeep(message);
+  return redactCommandError(pgRedacted, [
+    process.env[MANAGED_REGISTRY_DATABASE_URL_ENV] ?? '',
+    process.env[AILY_DEFAULT_TOKEN_ENV] ?? '',
+    process.env[AILY_FALLBACK_TOKEN_ENV] ?? '',
+  ]);
+}
+
+function resolveManagedTriggerRegistry(opts: {
+  request?: ManagedTriggerRequest;
+  env: EnvLookup;
+}): Pick<ManagedRegistryStatusOpts, 'registryPath' | 'registryStore' | 'registryUrl' | 'registryEnsureSchema'> {
+  const registryUrl = opts.request?.registry?.url ?? opts.env[MANAGED_REGISTRY_DATABASE_URL_ENV];
+  return {
+    registryPath: opts.request?.registry?.path,
+    registryStore: opts.request?.registry?.store ?? (registryUrl ? 'postgres' : 'json'),
+    registryUrl,
+    registryEnsureSchema: Boolean(opts.request?.registry?.ensureSchema),
+  };
+}
+
+function resolveManagedTriggerRoot(opts: {
+  action: ManagedTriggerAction;
+  request?: ManagedTriggerRequest;
+  registryStore: ManagedRegistryStoreKind;
+}): string {
+  const root = opts.request?.root;
+  if (root) return expandPath(root);
+  if (opts.action === 'status' && opts.registryStore === 'postgres') return process.cwd();
+  throw new Error(`managed trigger ${opts.action} requires request.root.`);
+}
+
+function resolveManagedTriggerKnowledgeSpaceId(request: ManagedTriggerRequest | undefined, env: EnvLookup): string {
+  return request?.aily?.knowledgeSpaceId ?? env[AILY_DEFAULT_SPACE_ID_ENV] ?? env[AILY_FALLBACK_SPACE_ID_ENV] ?? '';
+}
+
+export async function runManagedTrigger(input: ManagedTriggerInput = {}) {
+  const request = input.request ?? {};
+  const env = input.env ?? process.env;
+  const action = request.action ?? 'status';
+  const registry = resolveManagedTriggerRegistry({ request, env });
+  const root = resolveManagedTriggerRoot({ action, request, registryStore: registry.registryStore });
+  const sourceId = request.sourceId ?? 'feishu';
+
+  if (action === 'status') {
+    const opts: ManagedRegistryStatusOpts = {
+      path: root,
+      sourceId,
+      ...registry,
+      json: true,
+    };
+    const payload = await runManagedRegistryStatusJob({
+      root,
+      opts,
+      createStoreHandle: input.createStoreHandle,
+    });
+    return {
+      action,
+      status: payload.status,
+      result: payload,
+    };
+  }
+
+  const knowledgeSpaceId = resolveManagedTriggerKnowledgeSpaceId(request, env);
+  if (!knowledgeSpaceId) {
+    throw new Error(`managed trigger sync requires a knowledge space id.`);
+  }
+  const opts: ManagedSyncOpts = {
+    path: root,
+    sourceId,
+    host: normalizeAilyHost(request.aily?.host ?? env.RBRAIN_AILY_HOST ?? env.AILY_HOST ?? AILY_DEFAULT_HOST),
+    knowledgeSpaceId,
+    tokenEnv: request.aily?.tokenEnv ?? AILY_DEFAULT_TOKEN_ENV,
+    sourceUrlBase: normalizeAilyHost(request.aily?.sourceUrlBase ?? AILY_DEFAULT_SOURCE_URL_BASE),
+    limit: request.aily?.limit,
+    replace: request.aily?.replace ?? false,
+    dryRun: request.aily?.dryRun ?? false,
+    json: true,
+    ...registry,
+    trigger: request.trigger ?? 'api',
+    sourceKind: request.source?.kind ?? 'manual',
+    sourceName: request.source?.name ?? 'Feishu',
+    baseToken: request.base?.token,
+    baseTableId: request.base?.tableId,
+    baseAs: request.base?.as,
+  };
+  const job = await runManagedSyncJob({
+    root,
+    opts,
+    env,
+    createStoreHandle: input.createStoreHandle,
+    mirrorBaseRows: input.mirrorBaseRows,
+  });
+  return {
+    action,
+    status: job.payload.status,
+    result: job.payload,
+  };
+}
+
+export async function handleManagedTriggerRequest(input: {
+  request?: ManagedTriggerHttpRequest;
+  env?: EnvLookup;
+  createStoreHandle?: typeof createManagedRegistryStoreHandle;
+  mirrorBaseRows?: ManagedBaseMirrorRowsImpl;
+} = {}): Promise<ManagedTriggerHttpResponse> {
+  const method = (input.request?.method ?? 'POST').toUpperCase();
+  if (method !== 'POST') {
+    return managedTriggerJsonResponse(405, {
+      status: 'error',
+      error: `method ${method} is not allowed`,
+    });
+  }
+
+  try {
+    const request = parseManagedTriggerHttpBody(input.request?.body);
+    const result = await runManagedTrigger({
+      request,
+      env: input.env,
+      createStoreHandle: input.createStoreHandle,
+      mirrorBaseRows: input.mirrorBaseRows,
+    });
+    return managedTriggerJsonResponse(result.status === 'partial' ? 207 : 200, result);
+  } catch (error) {
+    return managedTriggerJsonResponse(400, {
+      status: 'error',
+      error: managedTriggerHttpErrorMessage(error),
+    });
+  }
+}
+
+function parseManagedTriggerTemplate(args: string[]): ManagedTriggerTemplateCliOpts {
+  const importSpecifier = parseFlagValue(args, '--import') ?? MANAGED_TRIGGER_TEMPLATE_IMPORT;
+  if (!importSpecifier.trim()) {
+    throw new Error(`${brand()} feishu managed trigger-template --import cannot be empty.`);
+  }
+  return {
+    importSpecifier,
+    json: args.includes('--json'),
+  };
+}
+
+export function buildManagedTriggerTemplate(opts: ManagedTriggerTemplateOpts = {}): string {
+  const importSpecifier = opts.importSpecifier ?? MANAGED_TRIGGER_TEMPLATE_IMPORT;
+  return `import { handleManagedTriggerRequest } from ${JSON.stringify(importSpecifier)};
+
+type Env = Record<string, string | undefined>;
+
+function runtimeEnv(): Env {
+  const globalWithProcess = globalThis as typeof globalThis & { process?: { env?: Env } };
+  return globalWithProcess.process?.env ?? {};
+}
+
+function toWebResponse(response: { status: number; headers: Record<string, string>; body: string }): Response {
+  return new Response(response.body, {
+    status: response.status,
+    headers: response.headers,
+  });
+}
+
+function postgresRegistry(env: Env) {
+  return {
+    store: 'postgres' as const,
+    url: env.RBRAIN_FEISHU_MANAGED_DATABASE_URL,
+    ensureSchema: true,
+  };
+}
+
+export default async function handler(request: Request): Promise<Response> {
+  const response = await handleManagedTriggerRequest({
+    request: {
+      method: request.method,
+      body: await request.text(),
+    },
+    env: runtimeEnv(),
+  });
+  return toWebResponse(response);
+}
+
+export async function scheduled(): Promise<Response> {
+  const env = runtimeEnv();
+  const response = await handleManagedTriggerRequest({
+    request: {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'sync',
+        root: env.RBRAIN_FEISHU_MIRROR_ROOT,
+        trigger: 'schedule',
+        registry: postgresRegistry(env),
+        aily: {
+          knowledgeSpaceId: env.RBRAIN_AILY_KNOWLEDGE_SPACE_ID,
+          tokenEnv: 'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN',
+        },
+        base: {
+          token: env.RBRAIN_FEISHU_MANAGED_BASE_TOKEN,
+          tableId: env.RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID,
+        },
+      }),
+    },
+    env,
+  });
+  return toWebResponse(response);
+}
+
+export async function status(): Promise<Response> {
+  const env = runtimeEnv();
+  const response = await handleManagedTriggerRequest({
+    request: {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'status',
+        registry: postgresRegistry(env),
+      }),
+    },
+    env,
+  });
+  return toWebResponse(response);
+}
+`;
+}
+
+function buildManagedTriggerTemplatePayload(opts: ManagedTriggerTemplateOpts = {}) {
+  const importSpecifier = opts.importSpecifier ?? MANAGED_TRIGGER_TEMPLATE_IMPORT;
+  return {
+    language: 'typescript',
+    import_specifier: importSpecifier,
+    env: Array.from(MANAGED_TRIGGER_TEMPLATE_ENV),
+    template: buildManagedTriggerTemplate({ importSpecifier }),
+  };
+}
+
+function printManagedTriggerTemplate(opts: ManagedTriggerTemplateCliOpts): void {
+  const payload = buildManagedTriggerTemplatePayload(opts);
+  if (opts.json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  console.log(payload.template);
+}
+
+async function runManaged(engine: BrainEngine | undefined, args: string[]): Promise<void> {
+  const sub = args[0];
+  if (!sub || sub === '--help' || sub === '-h' || sub === 'help') {
+    printHelp();
+    return;
+  }
+  if (sub === 'base-template') {
+    printManagedBaseTemplate(args.includes('--json'));
+    return;
+  }
+  if (sub === 'trigger-template') {
+    printManagedTriggerTemplate(parseManagedTriggerTemplate(args.slice(1)));
+    return;
+  }
+  if (sub === 'sql-schema') {
+    const sql = buildManagedRegistrySqlSchema();
+    if (args.includes('--json')) {
+      console.log(JSON.stringify({
+        schema_version: FEISHU_MANAGED_SQL_SCHEMA_VERSION,
+        dialect: 'postgres',
+        sql,
+      }, null, 2));
+    } else {
+      console.log(sql);
+    }
+    return;
+  }
+  if (sub === 'provision-base') {
+    const payload = provisionManagedBaseTable(parseManagedBaseProvision(args.slice(1)));
+    if (args.includes('--json')) console.log(JSON.stringify(payload, null, 2));
+    else printManagedBaseProvisionResult(payload);
+    if (payload.status === 'failed') process.exitCode = 1;
+    return;
+  }
+  if (sub === 'status') {
+    const rawArgs = args.slice(1);
+    const initialOpts = parseManagedRegistryStatus(rawArgs, loadAilyEnv(rawArgs), { requireRegistryUrl: false });
+    const root = await resolveManagedRegistryRoot(engine, initialOpts, 'status');
+    const env = loadAilyEnv(rawArgs, root);
+    const opts = parseManagedRegistryStatus(rawArgs, env);
+    const storeConfig = resolveManagedRegistryStoreConfig({
+      kind: opts.registryStore,
+      root,
+      registryPath: opts.registryPath,
+      registryUrl: opts.registryUrl,
+      ensureSchema: opts.registryEnsureSchema,
+    });
+    const payload = await runManagedRegistryStatusJob({ root, opts, storeConfig });
+    if (opts.json) console.log(JSON.stringify(payload, null, 2));
+    else printManagedRegistryStatusResult(payload);
+    return;
+  }
+  if (sub !== 'sync') {
+    throw new Error(`Usage: ${brand()} feishu managed <sync|status|base-template|trigger-template|provision-base|sql-schema> [options]`);
+  }
+
+  const rawArgs = args.slice(1);
+  const initialOpts = parseManagedSync(rawArgs, loadAilyEnv(rawArgs), {
+    requireKnowledgeSpaceId: false,
+    requireRegistryUrl: false,
+  });
+  const root = await resolveManagedRegistryRoot(engine, initialOpts, 'sync');
+  const env = loadAilyEnv(rawArgs, root);
+  const opts = parseManagedSync(rawArgs, env);
+  const storeConfig = resolveManagedRegistryStoreConfig({
+    kind: opts.registryStore,
+    root,
+    registryPath: opts.registryPath,
+    registryUrl: opts.registryUrl,
+    ensureSchema: opts.registryEnsureSchema,
+  });
+  const job = await runManagedSyncJob({
+    root,
+    opts,
+    env,
+    storeConfig,
+  });
+
+  if (opts.json) {
+    console.log(JSON.stringify(job.payload, null, 2));
+  } else {
+    printManagedSyncResult(job.payload);
+    if (!opts.dryRun && job.pushCandidates > 0) console.log(`  token source: ${job.tokenSource}`);
+  }
+  if (job.payload.aily.failed > 0 || job.payload.base_mirror.failed > 0) process.exitCode = 1;
 }
 
 function printStatusResult(payload: {
@@ -4934,6 +6218,32 @@ COMMANDS
       Reads .env from the current directory, the mirror root, or --env-file.
       Existing API-created assets are skipped unless --replace is passed.
 
+  managed sync [--path DIR] [--registry FILE] [--registry-store json|postgres]
+               [--registry-url POSTGRES_URL] [--registry-ensure-schema]
+               [--space-id knowledge_space_xxx] [--dry-run]
+               [--base-token TOKEN --base-table-id TABLE]
+      Prototype a Feishu-native managed asset registry using the default local JSON store.
+      Creates/updates sources, assets, and sync_runs rows, then previews Base rows.
+      Hash-matching assets are skipped locally; changed assets update Aily by title.
+      Set ${MANAGED_REGISTRY_DATABASE_URL_ENV} or --registry-url to use the Postgres store.
+      When Base args are present, mirrors rows by Source URI via lark-cli record search/upsert.
+
+  managed status [--path DIR] [--registry-store json|postgres] [--registry-url POSTGRES_URL]
+                 [--registry-ensure-schema] [--json]
+      Inspect managed registry counts, latest sync run, Aily statuses, and Base preview rows.
+
+  managed base-template [--json]
+      Print the Feishu Base field template used by managed sync status mirroring.
+
+  managed trigger-template [--json] [--import SPECIFIER]
+      Print a TypeScript HTTP/scheduled trigger wrapper for managed sync/status.
+
+  managed sql-schema [--json]
+      Print the Postgres DDL for the managed sources/assets/sync_runs registry.
+
+  managed provision-base --base-token TOKEN [--table-name NAME] [--dry-run] [--json]
+      Create the managed asset status table in an existing Feishu Base.
+
 EXAMPLES
   ${brand()} feishu init
   ${brand()} feishu setup --path ~/rbrain-feishu
@@ -4962,6 +6272,14 @@ EXAMPLES
   ${brand()} feishu pull im-message-search --query "pricing" --sync
   ${brand()} feishu pull im-chat-messages --chat-id oc_xxx --sync
   ${brand()} feishu aily push-space --space-id knowledge_space_xxx --dry-run
+  ${brand()} feishu managed base-template --json
+  ${brand()} feishu managed trigger-template > feishu-managed-trigger.ts
+  ${brand()} feishu managed sql-schema > feishu-managed-registry.sql
+  ${brand()} feishu managed provision-base --base-token appxxx --table-name "RBrain Managed Assets" --dry-run --json
+  ${brand()} feishu managed sync --path ~/rbrain-feishu --space-id knowledge_space_xxx --dry-run --json
+  ${brand()} feishu managed status --path ~/rbrain-feishu --json
+  ${brand()} feishu managed sync --path ~/rbrain-feishu --registry-store postgres --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --registry-ensure-schema --space-id knowledge_space_xxx
+  ${brand()} feishu managed status --registry-store postgres --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --json
   ${AILY_DEFAULT_TOKEN_ENV}=... ${brand()} feishu aily push-space --space-id knowledge_space_xxx
   ${brand()} feishu doctor
 `);
@@ -5014,6 +6332,10 @@ export async function runFeishu(args: string[], ctx: FeishuContext = {}): Promis
       throw new Error(`${brand()} feishu aily requires an initialized local RBrain database. Run ${brand()} init first.`);
     }
     await runAily(ctx.engine, args.slice(1));
+    return;
+  }
+  if (sub === 'managed') {
+    await runManaged(ctx.engine, args.slice(1));
     return;
   }
   if (sub === 'doctor') {

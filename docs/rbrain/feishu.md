@@ -123,6 +123,174 @@ The command reads `.env` from the current directory, the Feishu mirror root, or
 an explicit `--env-file`. Real `.env` files are ignored by Git; only
 `.env.*.example` templates should be committed.
 
+## Managed Asset Registry Prototype
+
+Phase 1 also includes a thin local adapter for the Feishu-native managed
+architecture:
+
+```bash
+rbrain feishu managed sync --path ~/rbrain-feishu --dry-run --json
+RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=... rbrain feishu managed sync --path ~/rbrain-feishu
+```
+
+This command models the future managed control plane without requiring a local
+RBrain database when `--path` is provided. It reads Feishu mirror Markdown,
+computes `content_sha256`, creates or updates deterministic Aily knowledge
+assets, and writes through the default local JSON registry store at:
+
+```text
+~/rbrain-feishu/.rbrain-managed/registry.json
+```
+
+The registry contains the three managed tables from the Phase 1 design:
+`sources`, `assets`, and `sync_runs`. The generated mirror `.gitignore` ignores
+`.rbrain-managed/`, because this is control-plane state rather than source
+knowledge. `managed sync` also returns a `base_mirror.preview` in JSON so the
+same rows can be inspected before writing to Feishu Base.
+
+The sync command reads and writes through a registry store boundary. The current
+store is JSON for local fixture and debugging runs; the same table contract is
+also implemented by `PostgresManagedRegistryStore` for the later Serverless PG /
+Miaoda runtime.
+
+To point the same sync flow at Postgres, set the managed registry store and URL:
+
+```bash
+RBRAIN_FEISHU_MANAGED_DATABASE_URL=postgresql://... \
+  rbrain feishu managed sync --path ~/rbrain-feishu \
+  --registry-store postgres \
+  --registry-ensure-schema
+```
+
+`--registry-ensure-schema` applies the DDL before reading the registry, which is
+useful for the first run against a new Serverless PG database. The URL is
+redacted in command output.
+
+Before running a full sync, inspect the managed registry:
+
+```bash
+rbrain feishu managed status --path ~/rbrain-feishu --json
+rbrain feishu managed status \
+  --registry-store postgres \
+  --registry-url "$RBRAIN_FEISHU_MANAGED_DATABASE_URL" \
+  --registry-ensure-schema \
+  --json
+```
+
+The status command does not require an Aily token. It reports source/asset/run
+counts, the latest sync run, Aily status counts, and a Base mirror preview.
+
+For an online trigger, first emit the deployable TypeScript wrapper:
+
+```bash
+rbrain feishu managed trigger-template > feishu-managed-trigger.ts
+rbrain feishu managed trigger-template --json
+```
+
+The generated template imports `handleManagedTriggerRequest` from
+`gbrain/feishu-managed`, exposes HTTP `handler`, `scheduled`, and `status`
+functions, and only names environment variables. It does not embed tokens or
+database URLs. Configure these variables in the target platform:
+
+```text
+RBRAIN_FEISHU_MIRROR_ROOT
+RBRAIN_FEISHU_MANAGED_DATABASE_URL
+RBRAIN_AILY_KNOWLEDGE_SPACE_ID
+RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN
+RBRAIN_FEISHU_MANAGED_BASE_TOKEN
+RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID
+```
+
+The underlying reusable API is `runManagedTrigger`. It accepts an action of
+`status` or `sync`, reads the same JSON/Postgres store configuration, and calls
+the same job functions used by the CLI:
+
+```ts
+import { runManagedTrigger } from 'gbrain/feishu-managed';
+
+await runManagedTrigger({
+  request: {
+    action: 'sync',
+    root: '/tmp/rbrain-feishu',
+    trigger: 'api',
+    registry: {
+      store: 'postgres',
+      url: process.env.RBRAIN_FEISHU_MANAGED_DATABASE_URL,
+      ensureSchema: true,
+    },
+    aily: {
+      knowledgeSpaceId: process.env.RBRAIN_AILY_KNOWLEDGE_SPACE_ID,
+    },
+  },
+  env: process.env,
+});
+```
+
+A Miaoda/server-function trigger can therefore share the same JSON/Postgres
+store behavior without spawning a local shell command.
+
+For HTTP-style server functions, wrap `handleManagedTriggerRequest` and pass the
+platform request body:
+
+```ts
+import { handleManagedTriggerRequest } from 'gbrain/feishu-managed';
+
+return handleManagedTriggerRequest({
+  request: {
+    method: request.method,
+    body: await request.text(),
+  },
+  env: process.env,
+});
+```
+
+The handler accepts JSON bodies shaped like `ManagedTriggerRequest`, returns
+JSON, rejects non-POST methods, and redacts PostgreSQL URLs from error output.
+
+Idempotency is registry-driven: if a candidate's hash matches the existing
+asset row, upload is skipped locally; if the hash changes, the Aily asset is
+updated by deterministic title. Secrets are not stored in the registry output.
+
+To mirror status into a real Feishu Base table, first inspect the table field
+contract:
+
+```bash
+rbrain feishu managed base-template --json
+```
+
+If you already have a Base, provision the status table:
+
+```bash
+rbrain feishu managed provision-base \
+  --base-token appxxx \
+  --table-name "RBrain Managed Assets"
+```
+
+Then pass the Base table identifiers to sync:
+
+```bash
+rbrain feishu managed sync --path ~/rbrain-feishu \
+  --base-token appxxx \
+  --base-table-id tblxxx
+```
+
+The command searches the table by `Source URI`. If a matching record exists, it
+updates that record; otherwise it creates one. The Base token is never printed
+in JSON output.
+
+For Serverless PG / Miaoda storage, emit the managed registry DDL:
+
+```bash
+rbrain feishu managed sql-schema > feishu-managed-registry.sql
+```
+
+The schema creates `feishu_managed_sources`, `feishu_managed_assets`, and
+`feishu_managed_sync_runs` with the same fields used by the local JSON registry,
+plus uniqueness constraints for `(source_id, source_uri)` and deterministic Aily
+asset titles. `PostgresManagedRegistryStore` reads and writes that schema, and
+`managed sync` can select it with `--registry-store postgres` plus
+`--registry-url` or `RBRAIN_FEISHU_MANAGED_DATABASE_URL`.
+
 For the proposed Feishu-native managed architecture, where Aily Knowledge Space
 is the runtime knowledge backend, Miaoda hosts the online control plane, and
 local RBrain becomes optional developer tooling, see
