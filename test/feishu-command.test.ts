@@ -77,6 +77,7 @@ import {
   runManagedSyncJob,
   runManagedTrigger,
   runManagedTriggerCanary,
+  runManagedWaitStatusJob,
   sendManagedTriggerProbe,
 } from '../src/commands/feishu.ts';
 
@@ -339,6 +340,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
     expect(stdout).toContain('managed status [--path DIR]');
     expect(stdout).toContain('managed refresh-status [--path DIR]');
+    expect(stdout).toContain('managed wait-status [--path DIR]');
     expect(stdout).toContain('managed base-template [--json]');
     expect(stdout).toContain('managed trigger-template [--json]');
     expect(stdout).toContain('managed deploy-bundle [--out DIR]');
@@ -1474,6 +1476,136 @@ describe('rbrain feishu command helpers', () => {
     const saved = loadManagedRegistry(defaultManagedRegistryPath(root));
     expect(saved.assets[0]!.aily_status).toBe('successful');
     expect(saved.assets[0]!.last_synced_at).toBe('2026-06-07T10:00:01.000Z');
+  });
+
+  test('managed wait-status job polls until Aily assets reach the target status', async () => {
+    const root = makeTempDir('rbrain-feishu-managed-wait-status-');
+    const candidates = collectAilyPushCandidates(root);
+    const seed = recordManagedSyncResult(createEmptyManagedRegistry('2026-06-07T10:00:00.000Z'), {
+      source: { id: 'feishu', kind: 'manual', name: 'Feishu' },
+      trigger: 'manual',
+      started_at: '2026-06-07T10:00:00.000Z',
+      finished_at: '2026-06-07T10:00:01.000Z',
+      assets: candidates.map((candidate, idx) => ({
+        source_uri: candidate.source_url,
+        title: candidate.relative_path,
+        content_sha256: candidate.content_sha256,
+        normalized_text_uri: candidate.relative_path,
+        aily_asset_title: candidate.title,
+        aily_asset_id: `knowledge_asset_${idx}`,
+        aily_status: 'learning',
+        action: 'created',
+      })),
+    });
+    saveManagedRegistry(defaultManagedRegistryPath(root), seed.snapshot);
+
+    let currentMs = 0;
+    let calls = 0;
+    const payload = await runManagedWaitStatusJob({
+      root,
+      env: { RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN: 'aily-secret-token' },
+      opts: {
+        path: root,
+        sourceId: 'feishu',
+        host: 'https://apaas.feishu.cn',
+        knowledgeSpaceId: 'knowledge_space_test',
+        tokenEnv: 'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN',
+        dryRun: false,
+        json: true,
+        registryStore: 'json',
+        registryEnsureSchema: false,
+        targetStatus: 'successful',
+        timeoutMs: 3_000,
+        intervalMs: 1_000,
+      },
+      now: () => currentMs,
+      sleep: async (ms) => {
+        currentMs += ms;
+      },
+      fetchImpl: async () => {
+        calls++;
+        return new Response(JSON.stringify({
+          status_code: '0',
+          data: {
+            knowledge_assets: [{
+              name: candidates[0]!.title,
+              knowledge_asset_id: 'knowledge_asset_0',
+              status: calls === 1 ? 'learning' : 'successful',
+            }],
+            has_more: false,
+          },
+        }));
+      },
+    });
+
+    expect(payload.status).toBe('ok');
+    expect(payload.attempts).toBe(2);
+    expect(payload.elapsed_ms).toBe(1_000);
+    expect(payload.final.assets[0]!.current_status).toBe('successful');
+    expect(loadManagedRegistry(defaultManagedRegistryPath(root)).assets[0]!.aily_status).toBe('successful');
+  });
+
+  test('managed wait-status job times out with the last observed Aily status', async () => {
+    const root = makeTempDir('rbrain-feishu-managed-wait-timeout-');
+    const candidates = collectAilyPushCandidates(root);
+    const seed = recordManagedSyncResult(createEmptyManagedRegistry('2026-06-07T10:00:00.000Z'), {
+      source: { id: 'feishu', kind: 'manual', name: 'Feishu' },
+      trigger: 'manual',
+      started_at: '2026-06-07T10:00:00.000Z',
+      finished_at: '2026-06-07T10:00:01.000Z',
+      assets: candidates.map((candidate, idx) => ({
+        source_uri: candidate.source_url,
+        title: candidate.relative_path,
+        content_sha256: candidate.content_sha256,
+        normalized_text_uri: candidate.relative_path,
+        aily_asset_title: candidate.title,
+        aily_asset_id: `knowledge_asset_${idx}`,
+        aily_status: 'learning',
+        action: 'created',
+      })),
+    });
+    saveManagedRegistry(defaultManagedRegistryPath(root), seed.snapshot);
+
+    let currentMs = 0;
+    const payload = await runManagedWaitStatusJob({
+      root,
+      env: { RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN: 'aily-secret-token' },
+      opts: {
+        path: root,
+        sourceId: 'feishu',
+        host: 'https://apaas.feishu.cn',
+        knowledgeSpaceId: 'knowledge_space_test',
+        tokenEnv: 'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN',
+        dryRun: true,
+        json: true,
+        registryStore: 'json',
+        registryEnsureSchema: false,
+        targetStatus: 'successful',
+        timeoutMs: 1_000,
+        intervalMs: 500,
+      },
+      now: () => currentMs,
+      sleep: async (ms) => {
+        currentMs += ms;
+      },
+      fetchImpl: async () => new Response(JSON.stringify({
+        status_code: '0',
+        data: {
+          knowledge_assets: [{
+            name: candidates[0]!.title,
+            knowledge_asset_id: 'knowledge_asset_0',
+            status: 'learning',
+          }],
+          has_more: false,
+        },
+      })),
+    });
+
+    expect(payload.status).toBe('timeout');
+    expect(payload.attempts).toBe(3);
+    expect(payload.elapsed_ms).toBe(1_000);
+    expect(payload.final.assets[0]!.current_status).toBe('learning');
+    expect(loadManagedRegistry(defaultManagedRegistryPath(root)).assets[0]!.aily_status).toBe('learning');
   });
 
   test('managed base-template prints the status table field contract', () => {

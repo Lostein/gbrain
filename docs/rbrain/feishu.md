@@ -211,6 +211,23 @@ registry, and marks missing remote assets as `missing`. It does not change
 `--base-token` and `--base-table-id` to mirror the refreshed status rows into
 Feishu Base.
 
+For deployment checks, wait for Aily's asynchronous learning job to finish:
+
+```bash
+RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=... \
+  rbrain feishu managed wait-status \
+  --path ~/rbrain-feishu \
+  --space-id knowledge_space_xxx \
+  --target-status successful \
+  --timeout-ms 300000 \
+  --json
+```
+
+`managed wait-status` repeatedly runs the same refresh path until every managed
+asset for the source reaches the target status, or until the timeout expires.
+On success it persists the refreshed registry/Base state; with `--dry-run` it
+only observes the remote Aily state.
+
 For an online trigger, first emit the deployable TypeScript wrapper:
 
 ```bash
@@ -264,6 +281,7 @@ only after the status probe is healthy:
 rbrain feishu managed probe --action status --url https://example.com/trigger --json
 rbrain feishu managed probe --action sync --root ~/rbrain-feishu --url https://example.com/trigger --json
 rbrain feishu managed probe --action refresh-status --url https://example.com/trigger --json
+rbrain feishu managed wait-status --registry-url "$RBRAIN_FEISHU_MANAGED_DATABASE_URL" --space-id "$RBRAIN_AILY_KNOWLEDGE_SPACE_ID" --json
 ```
 
 For a one-command deployment canary, run status first, then dry-run sync, then

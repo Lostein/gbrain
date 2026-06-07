@@ -50,7 +50,7 @@ const EXPECTED_EXPORTS: ExpectedExport[] = [
   { subpath: 'gbrain/search/hybrid', canary: ['hybridSearch', 'rrfFusion'] },
   { subpath: 'gbrain/search/expansion', canary: ['expandQuery'] },
   { subpath: 'gbrain/ai/gateway', canary: ['configureGateway', 'embed'] },
-  { subpath: 'gbrain/feishu-managed', canary: ['handleManagedTriggerRequest', 'runManagedTrigger', 'runManagedRefreshStatusJob', 'runManagedRegistryProvisionJob'] },
+  { subpath: 'gbrain/feishu-managed', canary: ['handleManagedTriggerRequest', 'runManagedTrigger', 'runManagedRefreshStatusJob', 'runManagedWaitStatusJob', 'runManagedRegistryProvisionJob'] },
   { subpath: 'gbrain/extract', canary: [] },
   { subpath: 'gbrain/ingestion', canary: ['INGESTION_SOURCE_API_VERSION', 'validateIngestionEvent', 'computeContentHash'] },
   { subpath: 'gbrain/ingestion/test-harness', canary: ['IngestionTestHarness', 'expectEvent'] },
