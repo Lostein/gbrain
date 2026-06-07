@@ -204,6 +204,18 @@ The bundle writes:
 By default the command refuses to overwrite existing files. Pass `--force` only
 when replacing a generated bundle intentionally.
 
+Before deploying, check the runtime environment without printing values:
+
+```bash
+rbrain feishu managed env-check --target canary --env-file ./feishu-managed-deploy/.env.example --json
+rbrain feishu managed env-check --target sync --json
+```
+
+`--target status` requires only the Serverless PG URL. `--target canary`
+requires PG, mirror root, and Aily Knowledge Space ID; the Aily token is a
+warning because the default canary sync is dry-run. `--target sync` treats the
+Aily token as required before real scheduled sync or `--no-dry-run`.
+
 Before or after deployment, generate the exact probe bodies:
 
 ```bash

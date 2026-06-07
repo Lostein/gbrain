@@ -5512,6 +5512,31 @@ interface ManagedCanaryCliOpts extends ManagedTriggerProbeOpts {
   json: boolean;
 }
 
+export type ManagedEnvCheckTarget = 'status' | 'canary' | 'sync';
+type ManagedEnvCheckStatus = 'ok' | 'warn' | 'fail';
+
+interface ManagedEnvCheckCliOpts {
+  target: ManagedEnvCheckTarget;
+  json: boolean;
+}
+
+export interface ManagedEnvCheckItem {
+  id: string;
+  status: 'ok' | 'missing' | 'warn';
+  required: boolean;
+  keys: string[];
+  present: string[];
+  purpose: string;
+  message?: string;
+}
+
+export interface ManagedEnvCheckResult {
+  status: ManagedEnvCheckStatus;
+  target: ManagedEnvCheckTarget;
+  checks: ManagedEnvCheckItem[];
+  next_steps: string[];
+}
+
 export interface ManagedTriggerProbeSendResult {
   status: 'ok' | 'error';
   url: string;
@@ -5851,9 +5876,16 @@ Miaoda or another TypeScript server-function runtime.
 2. Apply \`feishu-managed-registry.sql\` to the target Serverless PG database,
    or let the trigger create tables by sending \`registry.ensureSchema: true\`.
 3. Configure the environment variables from \`.env.example\`.
-4. Deploy \`feishu-managed-trigger.ts\` as the HTTP/manual and scheduled
+4. Check the runtime configuration without printing secret values:
+
+\`\`\`bash
+rbrain feishu managed env-check --target canary --env-file .env.example --json
+rbrain feishu managed env-check --target sync --json
+\`\`\`
+
+5. Deploy \`feishu-managed-trigger.ts\` as the HTTP/manual and scheduled
    server-function entrypoint.
-5. Run a status probe before enabling a full sync:
+6. Run a status probe before enabling a full sync:
 
 \`\`\`bash
 rbrain feishu managed probe --action status --json
@@ -5861,7 +5893,7 @@ rbrain feishu managed probe --action status --url https://your-runtime.example/t
 rbrain feishu managed canary --url https://your-runtime.example/trigger --status-only --json
 \`\`\`
 
-6. Run a dry-run sync probe with a small mirror root and verify:
+7. Run a dry-run sync probe with a small mirror root and verify:
 
 \`\`\`bash
 rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --json
@@ -5948,6 +5980,171 @@ function printManagedDeployBundleResult(payload: ReturnType<typeof writeManagedD
   for (const file of payload.files) console.log(`  - ${file.path} (${file.bytes} bytes)`);
   console.log(`  env:`);
   for (const key of payload.env) console.log(`  - ${key}`);
+}
+
+function parseManagedEnvCheckTarget(input: string | undefined): ManagedEnvCheckTarget {
+  if (input === undefined || input === 'sync') return 'sync';
+  if (input === 'status' || input === 'canary') return input;
+  throw new Error(`--target must be one of status, canary, sync`);
+}
+
+function parseManagedEnvCheck(args: string[]): ManagedEnvCheckCliOpts {
+  return {
+    target: parseManagedEnvCheckTarget(parseFlagValue(args, '--target')),
+    json: args.includes('--json'),
+  };
+}
+
+function hasEnvValue(env: EnvLookup, key: string): boolean {
+  return Boolean(env[key]?.trim());
+}
+
+function managedEnvAltCheck(opts: {
+  id: string;
+  keys: string[];
+  env: EnvLookup;
+  required: boolean;
+  purpose: string;
+  message?: string;
+}): ManagedEnvCheckItem {
+  const present = opts.keys.filter((key) => hasEnvValue(opts.env, key));
+  return {
+    id: opts.id,
+    status: present.length > 0 ? 'ok' : opts.required ? 'missing' : 'warn',
+    required: opts.required,
+    keys: opts.keys,
+    present,
+    purpose: opts.purpose,
+    ...(opts.message ? { message: opts.message } : {}),
+  };
+}
+
+function managedEnvSingleCheck(opts: {
+  id: string;
+  key: string;
+  env: EnvLookup;
+  required: boolean;
+  purpose: string;
+  message?: string;
+}): ManagedEnvCheckItem {
+  return managedEnvAltCheck({
+    id: opts.id,
+    keys: [opts.key],
+    env: opts.env,
+    required: opts.required,
+    purpose: opts.purpose,
+    message: opts.message,
+  });
+}
+
+function buildManagedBaseEnvCheck(env: EnvLookup): ManagedEnvCheckItem {
+  const keys = [MANAGED_BASE_TOKEN_ENV, MANAGED_BASE_TABLE_ID_ENV];
+  const present = keys.filter((key) => hasEnvValue(env, key));
+  const complete = present.length === keys.length;
+  return {
+    id: 'base_status_table',
+    status: present.length === 0 || complete ? 'ok' : 'warn',
+    required: false,
+    keys,
+    present,
+    purpose: 'Optional Feishu Base governance/status mirror.',
+    ...(present.length > 0 && !complete
+      ? { message: `Set both ${MANAGED_BASE_TOKEN_ENV} and ${MANAGED_BASE_TABLE_ID_ENV}, or neither.` }
+      : {}),
+  };
+}
+
+export function buildManagedEnvCheck(opts: {
+  env?: EnvLookup;
+  target?: ManagedEnvCheckTarget;
+} = {}): ManagedEnvCheckResult {
+  const env = opts.env ?? process.env;
+  const target = opts.target ?? 'sync';
+  const needsSync = target === 'canary' || target === 'sync';
+  const needsRealSync = target === 'sync';
+  const checks: ManagedEnvCheckItem[] = [
+    managedEnvSingleCheck({
+      id: 'serverless_pg',
+      key: MANAGED_REGISTRY_DATABASE_URL_ENV,
+      env,
+      required: true,
+      purpose: 'Serverless PG registry store for sources, assets, and sync runs.',
+    }),
+  ];
+
+  if (needsSync) {
+    checks.push(
+      managedEnvSingleCheck({
+        id: 'mirror_root',
+        key: MANAGED_MIRROR_ROOT_ENV,
+        env,
+        required: true,
+        purpose: 'Feishu mirror root visible to the deployed runtime.',
+      }),
+      managedEnvAltCheck({
+        id: 'aily_space',
+        keys: [AILY_DEFAULT_SPACE_ID_ENV, AILY_FALLBACK_SPACE_ID_ENV],
+        env,
+        required: true,
+        purpose: 'Aily Knowledge Space that receives managed assets.',
+      }),
+      managedEnvAltCheck({
+        id: 'aily_token',
+        keys: [AILY_DEFAULT_TOKEN_ENV, AILY_FALLBACK_TOKEN_ENV],
+        env,
+        required: needsRealSync,
+        purpose: 'Aily Knowledge Space API token for non-dry-run sync.',
+        message: needsRealSync
+          ? undefined
+          : 'Not required for the default dry-run canary, but required before --no-dry-run or scheduled sync.',
+      }),
+    );
+  }
+
+  checks.push(buildManagedBaseEnvCheck(env));
+
+  const hasMissing = checks.some((check) => check.required && check.status === 'missing');
+  const hasWarn = checks.some((check) => check.status === 'warn');
+  const status: ManagedEnvCheckStatus = hasMissing ? 'fail' : hasWarn ? 'warn' : 'ok';
+  const nextSteps: string[] = [];
+  if (hasMissing) {
+    nextSteps.push('Set the missing required environment variables in the runtime secret manager.');
+  }
+  if (target === 'status') {
+    nextSteps.push('Run managed canary with --status-only after deploying the trigger.');
+  } else if (target === 'canary') {
+    nextSteps.push('Run managed canary without --no-dry-run, then inspect status and dry-run sync output.');
+  } else {
+    nextSteps.push('Run managed canary in dry-run mode before enabling --no-dry-run or scheduled sync.');
+  }
+  if (checks.find((check) => check.id === 'base_status_table')?.status === 'warn') {
+    nextSteps.push('Complete or remove the optional Feishu Base status mirror variables.');
+  }
+
+  return {
+    status,
+    target,
+    checks,
+    next_steps: nextSteps,
+  };
+}
+
+function printManagedEnvCheckResult(payload: ManagedEnvCheckResult, json: boolean): void {
+  if (json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  console.log(`Feishu managed env check: ${payload.status}`);
+  console.log(`  target: ${payload.target}`);
+  for (const check of payload.checks) {
+    const present = check.present.length > 0 ? check.present.join(', ') : 'none';
+    console.log(`  - ${check.id}: ${check.status} (present: ${present})`);
+    if (check.message) console.log(`    ${check.message}`);
+  }
+  if (payload.next_steps.length > 0) {
+    console.log(`  next:`);
+    for (const step of payload.next_steps) console.log(`  - ${step}`);
+  }
 }
 
 function parseManagedProbeAction(input: string | undefined): ManagedTriggerAction {
@@ -6196,6 +6393,17 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     printManagedDeployBundleResult(writeManagedDeployBundle(opts), opts.json);
     return;
   }
+  if (sub === 'env-check') {
+    const rawArgs = args.slice(1);
+    const opts = parseManagedEnvCheck(rawArgs);
+    const payload = buildManagedEnvCheck({
+      env: loadAilyEnv(rawArgs),
+      target: opts.target,
+    });
+    printManagedEnvCheckResult(payload, opts.json);
+    if (payload.status === 'fail') process.exitCode = 1;
+    return;
+  }
   if (sub === 'canary') {
     const opts = parseManagedCanary(args.slice(1));
     const payload = await runManagedTriggerCanary(opts);
@@ -6254,7 +6462,7 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     return;
   }
   if (sub !== 'sync') {
-    throw new Error(`Usage: ${brand()} feishu managed <sync|status|base-template|trigger-template|deploy-bundle|probe|canary|provision-base|sql-schema> [options]`);
+    throw new Error(`Usage: ${brand()} feishu managed <sync|status|base-template|trigger-template|deploy-bundle|env-check|probe|canary|provision-base|sql-schema> [options]`);
   }
 
   const rawArgs = args.slice(1);
@@ -6706,6 +6914,9 @@ COMMANDS
   managed deploy-bundle [--out DIR] [--import SPECIFIER] [--force] [--json]
       Write trigger, Postgres DDL, env example, and README files for deployment.
 
+  managed env-check [--target status|canary|sync] [--env-file FILE] [--json]
+      Check managed runtime env names without printing secret values.
+
   managed probe [--action status|sync] [--root DIR] [--url URL] [--json]
       Print or POST a managed trigger status/sync probe. Sync probes default to dry-run.
 
@@ -6749,6 +6960,7 @@ EXAMPLES
   ${brand()} feishu managed base-template --json
   ${brand()} feishu managed trigger-template > feishu-managed-trigger.ts
   ${brand()} feishu managed deploy-bundle --out ./feishu-managed-deploy --json
+  ${brand()} feishu managed env-check --target canary --env-file ./feishu-managed-deploy/.env.example --json
   ${brand()} feishu managed probe --action status --json
   ${brand()} feishu managed probe --action sync --root ~/rbrain-feishu --url https://example.com/trigger --json
   ${brand()} feishu managed canary --root ~/rbrain-feishu --url https://example.com/trigger --json
