@@ -152,19 +152,22 @@ Idempotency is registry-driven: if a candidate's hash matches the existing
 asset row, upload is skipped locally; if the hash changes, the Aily asset is
 updated by deterministic title. Secrets are not stored in the registry output.
 
-To mirror status into a real Feishu Base table, create a table with these text
-fields:
+To mirror status into a real Feishu Base table, first inspect the table field
+contract:
 
-- `Source ID`
-- `Source URI`
-- `Title`
-- `Content SHA256`
-- `Aily Asset ID`
-- `Aily Asset Title`
-- `Aily Status`
-- `Last Synced At`
+```bash
+rbrain feishu managed base-template --json
+```
 
-Then pass the Base identifiers:
+If you already have a Base, provision the status table:
+
+```bash
+rbrain feishu managed provision-base \
+  --base-token appxxx \
+  --table-name "RBrain Managed Assets"
+```
+
+Then pass the Base table identifiers to sync:
 
 ```bash
 rbrain feishu managed sync --path ~/rbrain-feishu \

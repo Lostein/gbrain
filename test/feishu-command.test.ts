@@ -321,6 +321,8 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN');
     expect(stdout).toContain('managed sync [--path DIR]');
     expect(stdout).toContain('Prototype a Feishu-native managed asset registry');
+    expect(stdout).toContain('managed base-template [--json]');
+    expect(stdout).toContain('managed provision-base --base-token TOKEN');
   });
 
   test('Aily push candidates convert mirror markdown to deterministic txt assets', () => {
@@ -480,6 +482,77 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.aily.assets[0]!.relative_path).toBe('feishu/rbrain-feishu-overview.md');
     expect(payload.base_mirror.rows).toBe(2);
     expect(existsSync(payload.registry_path)).toBe(false);
+  });
+
+  test('managed base-template prints the status table field contract', () => {
+    const proc = Bun.spawnSync({
+      cmd: ['bun', 'run', 'src/rbrain.ts', 'feishu', 'managed', 'base-template', '--json'],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      table_name: string;
+      fields: Array<{ name: string; type: string }>;
+    };
+    expect(payload.table_name).toBe('RBrain Managed Assets');
+    expect(payload.fields).toContainEqual({ name: 'Source URI', type: 'text' });
+    expect(payload.fields).toContainEqual({ name: 'Aily Status', type: 'text' });
+  });
+
+  test('managed provision-base creates the Base status table without leaking the token', () => {
+    const fakeBin = makeTempDir('rbrain-feishu-provision-base-bin-');
+    const logFile = join(fakeBin, 'calls.log');
+    const fakeLark = `#!/usr/bin/env bash
+set -euo pipefail
+printf '%q ' "$@" >> "${logFile}"
+printf '\\n' >> "${logFile}"
+if [ "\${2:-}" = "+table-create" ]; then
+  echo '{"data":{"table":{"table_id":"tbl_created"}}}'
+  exit 0
+fi
+echo '{"ok":true}'
+`;
+    writeFileSync(join(fakeBin, 'lark-cli'), fakeLark, { encoding: 'utf-8', mode: 0o755 });
+
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'provision-base',
+        '--base-token',
+        'base-secret-token',
+        '--table-name',
+        'RBrain Managed Assets',
+        '--json',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+      },
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    expect(proc.stdout.toString()).not.toContain('base-secret-token');
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      status: string;
+      table_id: string | null;
+      command: string[];
+      fields: Array<{ name: string; type: string }>;
+    };
+    expect(payload.status).toBe('ok');
+    expect(payload.table_id).toBe('tbl_created');
+    expect(payload.command).toContain('<redacted>');
+    expect(payload.fields).toContainEqual({ name: 'Source URI', type: 'text' });
+    const log = readFileSync(logFile, 'utf-8');
+    expect(log).toContain('+table-create');
+    expect(log).toContain('RBrain\\ Managed\\ Assets');
   });
 
   test('managed sync mirrors registry rows into Base by Source URI', () => {

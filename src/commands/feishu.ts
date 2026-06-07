@@ -10,6 +10,7 @@ import { addSource as addBrainSource, SourceOpError } from '../core/sources-ops.
 import {
   MANAGED_BASE_FIELD_NAMES,
   buildManagedBaseRecordFields,
+  buildManagedBaseTableFieldsJson,
   buildManagedBaseMirrorRows,
   cloneManagedRegistry,
   defaultManagedRegistryPath,
@@ -272,6 +273,14 @@ interface ManagedSyncOpts extends AilyPushSpaceOpts {
   baseToken?: string;
   baseTableId?: string;
   baseAs?: string;
+}
+
+interface ManagedBaseProvisionOpts {
+  baseToken?: string;
+  tableName: string;
+  as?: string;
+  dryRun: boolean;
+  json: boolean;
 }
 
 interface FeishuContext {
@@ -826,6 +835,16 @@ function parseManagedSync(
     baseToken: parseFlagValue(args, '--base-token'),
     baseTableId: parseFlagValue(args, '--base-table-id'),
     baseAs: parseFlagValue(args, '--base-as'),
+  };
+}
+
+function parseManagedBaseProvision(args: string[]): ManagedBaseProvisionOpts {
+  return {
+    baseToken: parseFlagValue(args, '--base-token'),
+    tableName: parseFlagValue(args, '--table-name') ?? parseFlagValue(args, '--name') ?? 'RBrain Managed Assets',
+    as: parseFlagValue(args, '--as'),
+    dryRun: args.includes('--dry-run'),
+    json: args.includes('--json'),
   };
 }
 
@@ -4721,6 +4740,15 @@ interface ManagedBaseMirrorWriteResult {
   errors: string[];
 }
 
+interface ManagedBaseProvisionResult {
+  status: 'dry_run' | 'ok' | 'failed';
+  table_name: string;
+  table_id: string | null;
+  fields: ReturnType<typeof buildManagedBaseTableFieldsJson>;
+  command: string[];
+  error?: string;
+}
+
 function withOptionalFlag(args: string[], name: string, value: string | undefined): string[] {
   return value ? [...args, name, value] : args;
 }
@@ -4763,6 +4791,124 @@ function extractBaseRecordIdFromSearch(input: string): string | null {
   };
 
   return visit(parsed);
+}
+
+function extractBaseTableId(input: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input);
+  } catch {
+    return null;
+  }
+
+  const visit = (value: unknown): string | null => {
+    if (!value || typeof value !== 'object') return null;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = visit(item);
+        if (found) return found;
+      }
+      return null;
+    }
+    const obj = value as Record<string, unknown>;
+    for (const key of ['table_id', 'tableId', 'id']) {
+      const candidate = obj[key];
+      if (typeof candidate === 'string' && /^tbl[a-zA-Z0-9_]+/.test(candidate)) return candidate;
+    }
+    for (const child of Object.values(obj)) {
+      const found = visit(child);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  return visit(parsed);
+}
+
+function redactArgv(argv: string[], secrets: string[]): string[] {
+  return argv.map((arg) => {
+    let out = arg;
+    for (const secret of secrets) {
+      if (secret) out = out.split(secret).join('<redacted>');
+    }
+    return out;
+  });
+}
+
+function provisionManagedBaseTable(
+  opts: ManagedBaseProvisionOpts,
+  commandImpl: typeof runLocalCommand = runLocalCommand,
+): ManagedBaseProvisionResult {
+  const fields = buildManagedBaseTableFieldsJson();
+  const token = opts.baseToken ?? '<base-token>';
+  let argv = withOptionalFlag([
+    'lark-cli',
+    'base',
+    '+table-create',
+    '--base-token',
+    token,
+    '--name',
+    opts.tableName,
+    '--fields',
+    JSON.stringify(fields),
+    '--format',
+    'json',
+  ], '--as', opts.as);
+  const redactedCommand = redactArgv(argv, [opts.baseToken ?? '']);
+  if (opts.dryRun) {
+    return {
+      status: 'dry_run',
+      table_name: opts.tableName,
+      table_id: null,
+      fields,
+      command: redactedCommand,
+    };
+  }
+  if (!opts.baseToken) {
+    throw new Error(`${brand()} feishu managed provision-base requires --base-token unless --dry-run is set.`);
+  }
+
+  argv = redactedCommand.map((arg) => arg === '<redacted>' ? opts.baseToken! : arg);
+  const result = commandImpl(argv);
+  if (!result.ok) {
+    return {
+      status: 'failed',
+      table_name: opts.tableName,
+      table_id: null,
+      fields,
+      command: redactedCommand,
+      error: redactCommandError(result.stderr || result.stdout, [opts.baseToken]),
+    };
+  }
+
+  return {
+    status: 'ok',
+    table_name: opts.tableName,
+    table_id: extractBaseTableId(result.stdout),
+    fields,
+    command: redactedCommand,
+  };
+}
+
+function printManagedBaseTemplate(json: boolean): void {
+  const payload = {
+    table_name: 'RBrain Managed Assets',
+    fields: buildManagedBaseTableFieldsJson(),
+  };
+  if (json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  console.log('RBrain managed Base template');
+  console.log(`  table: ${payload.table_name}`);
+  for (const field of payload.fields) console.log(`  - ${field.name} (${field.type})`);
+}
+
+function printManagedBaseProvisionResult(payload: ManagedBaseProvisionResult): void {
+  console.log(`Feishu managed Base provision: ${payload.status}`);
+  console.log(`  table: ${payload.table_name}${payload.table_id ? ` (${payload.table_id})` : ''}`);
+  console.log(`  fields: ${payload.fields.length}`);
+  if (payload.error) console.log(`  error: ${payload.error}`);
 }
 
 function mirrorManagedBaseRows(opts: {
@@ -4858,8 +5004,19 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     printHelp();
     return;
   }
+  if (sub === 'base-template') {
+    printManagedBaseTemplate(args.includes('--json'));
+    return;
+  }
+  if (sub === 'provision-base') {
+    const payload = provisionManagedBaseTable(parseManagedBaseProvision(args.slice(1)));
+    if (args.includes('--json')) console.log(JSON.stringify(payload, null, 2));
+    else printManagedBaseProvisionResult(payload);
+    if (payload.status === 'failed') process.exitCode = 1;
+    return;
+  }
   if (sub !== 'sync') {
-    throw new Error(`Usage: ${brand()} feishu managed sync --path DIR --space-id <knowledge_space_xxx> [--dry-run]`);
+    throw new Error(`Usage: ${brand()} feishu managed <sync|base-template|provision-base> [options]`);
   }
 
   const rawArgs = args.slice(1);
@@ -5391,6 +5548,12 @@ COMMANDS
       Hash-matching assets are skipped locally; changed assets update Aily by title.
       When Base args are present, mirrors rows by Source URI via lark-cli record search/upsert.
 
+  managed base-template [--json]
+      Print the Feishu Base field template used by managed sync status mirroring.
+
+  managed provision-base --base-token TOKEN [--table-name NAME] [--dry-run] [--json]
+      Create the managed asset status table in an existing Feishu Base.
+
 EXAMPLES
   ${brand()} feishu init
   ${brand()} feishu setup --path ~/rbrain-feishu
@@ -5419,6 +5582,8 @@ EXAMPLES
   ${brand()} feishu pull im-message-search --query "pricing" --sync
   ${brand()} feishu pull im-chat-messages --chat-id oc_xxx --sync
   ${brand()} feishu aily push-space --space-id knowledge_space_xxx --dry-run
+  ${brand()} feishu managed base-template --json
+  ${brand()} feishu managed provision-base --base-token appxxx --table-name "RBrain Managed Assets" --dry-run --json
   ${brand()} feishu managed sync --path ~/rbrain-feishu --space-id knowledge_space_xxx --dry-run --json
   ${AILY_DEFAULT_TOKEN_ENV}=... ${brand()} feishu aily push-space --space-id knowledge_space_xxx
   ${brand()} feishu doctor
