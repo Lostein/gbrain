@@ -123,6 +123,35 @@ The command reads `.env` from the current directory, the Feishu mirror root, or
 an explicit `--env-file`. Real `.env` files are ignored by Git; only
 `.env.*.example` templates should be committed.
 
+## Managed Asset Registry Prototype
+
+Phase 1 also includes a thin local adapter for the Feishu-native managed
+architecture:
+
+```bash
+rbrain feishu managed sync --path ~/rbrain-feishu --dry-run --json
+RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=... rbrain feishu managed sync --path ~/rbrain-feishu
+```
+
+This command models the future managed control plane without requiring a local
+RBrain database when `--path` is provided. It reads Feishu mirror Markdown,
+computes `content_sha256`, creates or updates deterministic Aily knowledge
+assets, and writes a local registry at:
+
+```text
+~/rbrain-feishu/.rbrain-managed/registry.json
+```
+
+The registry contains the three managed tables from the Phase 1 design:
+`sources`, `assets`, and `sync_runs`. The generated mirror `.gitignore` ignores
+`.rbrain-managed/`, because this is control-plane state rather than source
+knowledge. `managed sync` also returns a `base_mirror.preview` in JSON so the
+same rows can be written to a Feishu Base table in the next slice.
+
+Idempotency is registry-driven: if a candidate's hash matches the existing
+asset row, upload is skipped locally; if the hash changes, the Aily asset is
+updated by deterministic title. Secrets are not stored in the registry output.
+
 For the proposed Feishu-native managed architecture, where Aily Knowledge Space
 is the runtime knowledge backend, Miaoda hosts the online control plane, and
 local RBrain becomes optional developer tooling, see

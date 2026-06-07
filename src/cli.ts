@@ -1922,7 +1922,7 @@ SETUP
   check-update [--json]              Check for new versions
   doctor [--json] [--fast]            Health check (resolver, skills, pgvector, RLS, embeddings)
   integrations [subcommand]          Manage integration recipes (senses + reflexes)
-  feishu <init|setup|pull|refresh|status|aily|doctor>
+  feishu <init|setup|pull|refresh|status|aily|managed|doctor>
                                       Feishu mirror helpers for RBrain
 
 PAGES

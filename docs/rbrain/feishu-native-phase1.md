@@ -118,7 +118,8 @@ Phase 1 should preserve the useful behavior from `rbrain feishu aily push-space`
 
 - Deterministic asset titles are derived from source identity.
 - Content hashes decide whether an upload is needed.
-- Existing Aily assets are skipped unless replacement is explicitly requested.
+- Hash-matching registry assets are skipped locally.
+- Changed assets update the deterministic Aily asset title in place.
 - Secrets never appear in returned JSON, sync logs, Base rows, or committed files.
 
 ## Prototype Options
@@ -160,6 +161,29 @@ Risk:
 
 Start with Option B only if Miaoda platform access is blocked. Otherwise, prefer
 Option A and keep the local CLI as a fixture generator and debugging client.
+
+## Current Local Adapter Slice
+
+This branch implements the Option B fixture path:
+
+```bash
+rbrain feishu managed sync --path ~/rbrain-feishu --space-id knowledge_space_xxx --dry-run --json
+RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=... rbrain feishu managed sync --path ~/rbrain-feishu --space-id knowledge_space_xxx
+```
+
+The local adapter:
+
+- represents `sources`, `assets`, and `sync_runs` in a JSON registry
+- stores the registry under `.rbrain-managed/registry.json`
+- ignores `.rbrain-managed/` in generated mirror Git repos
+- works without a local RBrain database when `--path` is provided
+- uses registry `content_sha256` to skip unchanged assets
+- updates changed Aily assets by deterministic asset title
+- returns `base_mirror.preview` rows for the future Feishu Base status table
+
+It is intentionally not the final managed backend. The next slice should replace
+or wrap the JSON registry with Serverless PG / Miaoda storage and write the
+`base_mirror.preview` rows into a real Base table.
 
 ## Acceptance Criteria
 
@@ -205,10 +229,11 @@ Manual platform checks:
 ## Next Implementation Tasks
 
 1. Confirm Miaoda platform access and runtime capabilities.
-2. Decide Option A or Option B for the first prototype.
-3. Create the three managed tables: `sources`, `assets`, `sync_runs`.
-4. Implement the minimal sync run state machine.
-5. Reuse or port deterministic Aily asset title generation.
-6. Add mocked Aily create/update/skip tests.
-7. Mirror asset status into a Base table.
-8. Document the prototype setup and manual verification flow.
+2. Replace or wrap the local JSON registry with the target Serverless PG /
+   Miaoda table layer.
+3. Write `base_mirror.preview` rows into a real Feishu Base table.
+4. Add a real manual/scheduled Miaoda trigger.
+5. Verify Aily Knowledge Space reaches `successful` for a managed sync asset.
+6. Verify the Aily custom agent answers using the managed asset.
+7. Decide whether `managed sync` remains a developer fixture or becomes the
+   canonical debugging client for the online control plane.

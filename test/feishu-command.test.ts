@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import matter from 'gray-matter';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withEnv } from './helpers/with-env.ts';
@@ -137,6 +137,7 @@ describe('rbrain feishu command helpers', () => {
     expect(buildMirrorGitignore()).toContain('.env\n');
     expect(buildMirrorGitignore()).toContain('.env.*\n');
     expect(buildMirrorGitignore()).toContain('!.env.*.example');
+    expect(buildMirrorGitignore()).toContain('.rbrain-managed/');
     expect(buildAilyEnvExample()).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_ID=knowledge_space_xxx');
     expect(buildAilyEnvExample()).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=');
     expect(buildAilyEnvExample()).not.toContain('DWL');
@@ -317,6 +318,8 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('aily push-space [--space-id knowledge_space_xxx]');
     expect(stdout).toContain('--env-file FILE');
     expect(stdout).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN');
+    expect(stdout).toContain('managed sync [--path DIR]');
+    expect(stdout).toContain('Prototype a Feishu-native managed asset registry');
   });
 
   test('Aily push candidates convert mirror markdown to deterministic txt assets', () => {
@@ -432,6 +435,50 @@ describe('rbrain feishu command helpers', () => {
     expect(result.skipped).toBe(2);
     expect(result.assets[0]!.action).toBe('skipped_existing');
     expect(calls.map((call) => call.method)).toEqual(['GET']);
+  });
+
+  test('managed sync dry-run works from --path without a local RBrain database', () => {
+    const root = makeTempDir('rbrain-feishu-managed-');
+    const dir = join(root, 'feishu', 'docs');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'roadmap.md'), '# Roadmap\n\nPlanning notes.\n', 'utf-8');
+
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'sync',
+        '--path',
+        root,
+        '--space-id',
+        'knowledge_space_test',
+        '--dry-run',
+        '--json',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      persisted: boolean;
+      registry_path: string;
+      sync_run: { assets_seen: number; assets_changed: number; assets_uploaded: number };
+      aily: { assets: Array<{ action: string; relative_path: string }> };
+      base_mirror: { rows: number };
+    };
+    expect(payload.persisted).toBe(false);
+    expect(payload.registry_path).toBe(join(root, '.rbrain-managed', 'registry.json'));
+    expect(payload.sync_run.assets_seen).toBe(2);
+    expect(payload.sync_run.assets_changed).toBe(2);
+    expect(payload.sync_run.assets_uploaded).toBe(0);
+    expect(payload.aily.assets.map((asset) => asset.action)).toEqual(['dry_run_create', 'dry_run_create']);
+    expect(payload.aily.assets[0]!.relative_path).toBe('feishu/rbrain-feishu-overview.md');
+    expect(payload.base_mirror.rows).toBe(2);
+    expect(existsSync(payload.registry_path)).toBe(false);
   });
 
   test('expandPath resolves tilde paths', () => {

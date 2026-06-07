@@ -7,6 +7,19 @@ import matter from 'gray-matter';
 import type { BrainEngine } from '../core/engine.ts';
 import { assertValidSourceId } from '../core/source-id.ts';
 import { addSource as addBrainSource, SourceOpError } from '../core/sources-ops.ts';
+import {
+  buildManagedBaseMirrorRows,
+  cloneManagedRegistry,
+  defaultManagedRegistryPath,
+  loadManagedRegistry,
+  recordManagedSyncResult,
+  saveManagedRegistry,
+  type ManagedAssetObservation,
+  type ManagedBaseMirrorRow,
+  type ManagedRegistrySnapshot,
+  type ManagedSourceKind,
+  type ManagedSyncRunRow,
+} from '../core/feishu-managed-registry.ts';
 
 export const FEISHU_MIRROR_DIRS = [
   'feishu/docs',
@@ -247,6 +260,13 @@ interface AilyPushSpaceOpts {
   replace: boolean;
   dryRun: boolean;
   json: boolean;
+}
+
+interface ManagedSyncOpts extends AilyPushSpaceOpts {
+  registryPath?: string;
+  trigger: string;
+  sourceKind: ManagedSourceKind;
+  sourceName: string;
 }
 
 interface FeishuContext {
@@ -761,6 +781,36 @@ function parseAilyPushSpace(
     replace: args.includes('--replace'),
     dryRun: args.includes('--dry-run'),
     json: args.includes('--json'),
+  };
+}
+
+function parseManagedSourceKind(input: string | undefined): ManagedSourceKind {
+  if (
+    input === 'doc' ||
+    input === 'drive' ||
+    input === 'wiki' ||
+    input === 'im' ||
+    input === 'base' ||
+    input === 'manual'
+  ) {
+    return input;
+  }
+  if (input === undefined) return 'manual';
+  throw new Error(`--source-kind must be one of doc, drive, wiki, im, base, manual`);
+}
+
+function parseManagedSync(
+  args: string[],
+  env: EnvLookup = process.env,
+  opts: { requireKnowledgeSpaceId?: boolean } = {},
+): ManagedSyncOpts {
+  const aily = parseAilyPushSpace(args, env, opts);
+  return {
+    ...aily,
+    registryPath: parseFlagValue(args, '--registry') ? expandPath(parseFlagValue(args, '--registry')!) : undefined,
+    trigger: parseFlagValue(args, '--trigger') ?? 'manual',
+    sourceKind: parseManagedSourceKind(parseFlagValue(args, '--source-kind')),
+    sourceName: parseFlagValue(args, '--name') ?? 'Feishu',
   };
 }
 
@@ -1595,6 +1645,7 @@ export function buildMirrorGitignore(): string {
   return `.env
 .env.*
 !.env.*.example
+.rbrain-managed/
 .DS_Store
 *.log
 `;
@@ -4446,14 +4497,16 @@ export async function pushAilyKnowledgeSpace(opts: {
   limit?: number;
   replace?: boolean;
   dryRun?: boolean;
+  candidates?: AilyPushCandidate[];
+  dryRunExistingAssets?: AilyAssetRow[];
   fetchImpl?: FetchLike;
 }): Promise<AilyPushSpaceResult> {
-  const candidates = collectAilyPushCandidates(opts.root, {
+  const candidates = opts.candidates ?? collectAilyPushCandidates(opts.root, {
     limit: opts.limit,
     sourceUrlBase: opts.sourceUrlBase,
   });
   const existingAssets = opts.dryRun
-    ? []
+    ? opts.dryRunExistingAssets ?? []
     : await listAilyKnowledgeAssets({
         host: opts.host,
         knowledgeSpaceId: opts.knowledgeSpaceId,
@@ -4537,6 +4590,227 @@ export async function pushAilyKnowledgeSpace(opts: {
     failed,
     assets,
   };
+}
+
+function summarizeAilyPushAssets(opts: {
+  root: string;
+  host: string;
+  knowledgeSpaceId: string;
+  dryRun: boolean;
+  replace: boolean;
+  assets: AilyPushItemResult[];
+}): AilyPushSpaceResult {
+  const created = opts.assets.filter((asset) => asset.action === 'created').length;
+  const updated = opts.assets.filter((asset) => asset.action === 'updated').length;
+  const failed = opts.assets.filter((asset) => asset.action === 'failed').length;
+  const skipped = opts.assets.length - created - updated - failed;
+  return {
+    status: failed > 0 ? 'partial' : 'ok',
+    host: opts.host,
+    knowledge_space_id: opts.knowledgeSpaceId,
+    path: opts.root,
+    dry_run: opts.dryRun,
+    replace: opts.replace,
+    candidates: opts.assets.length,
+    created,
+    updated,
+    skipped,
+    failed,
+    assets: opts.assets,
+  };
+}
+
+function registryAilyAssets(snapshot: ManagedRegistrySnapshot): Map<string, AilyAssetRow> {
+  const out = new Map<string, AilyAssetRow>();
+  for (const asset of snapshot.assets) {
+    if (!asset.aily_asset_id) continue;
+    out.set(asset.aily_asset_title, {
+      knowledge_asset_id: asset.aily_asset_id,
+      name: asset.aily_asset_title,
+      status: asset.aily_status ?? undefined,
+    });
+  }
+  return out;
+}
+
+function managedObservationFromAilyAsset(asset: AilyPushItemResult): ManagedAssetObservation {
+  return {
+    source_uri: asset.source_url,
+    title: asset.relative_path,
+    content_sha256: asset.content_sha256,
+    normalized_text_uri: asset.relative_path,
+    aily_asset_title: asset.title,
+    aily_asset_id: asset.knowledge_asset_id ?? null,
+    aily_status: asset.asset_status ?? null,
+    action: asset.action,
+    error: asset.error,
+  };
+}
+
+function buildManagedSyncPayload(opts: {
+  registryPath: string;
+  persisted: boolean;
+  syncRun: ManagedSyncRunRow;
+  push: AilyPushSpaceResult;
+  baseRows: ManagedBaseMirrorRow[];
+}) {
+  return {
+    status: opts.push.status,
+    dry_run: opts.push.dry_run,
+    persisted: opts.persisted,
+    registry_path: opts.registryPath,
+    sync_run: opts.syncRun,
+    aily: opts.push,
+    base_mirror: {
+      rows: opts.baseRows.length,
+      preview: opts.baseRows.slice(0, 20),
+    },
+  };
+}
+
+function printManagedSyncResult(payload: ReturnType<typeof buildManagedSyncPayload>): void {
+  console.log(`Feishu managed sync: ${payload.status}`);
+  console.log(`  registry: ${payload.registry_path}${payload.persisted ? '' : ' (dry-run, not written)'}`);
+  console.log(
+    `  run: ${payload.sync_run.id} ${payload.sync_run.status}, ` +
+    `${payload.sync_run.assets_seen} seen, ${payload.sync_run.assets_changed} changed, ` +
+    `${payload.sync_run.assets_uploaded} uploaded`,
+  );
+  console.log(
+    `  Aily: ${payload.aily.created} created, ${payload.aily.updated} updated, ` +
+    `${payload.aily.skipped} skipped, ${payload.aily.failed} failed`,
+  );
+  console.log(`  Base mirror rows: ${payload.base_mirror.rows}`);
+  if (payload.sync_run.error_summary) console.log(`  errors: ${payload.sync_run.error_summary}`);
+}
+
+async function runManaged(engine: BrainEngine | undefined, args: string[]): Promise<void> {
+  const sub = args[0];
+  if (!sub || sub === '--help' || sub === '-h' || sub === 'help') {
+    printHelp();
+    return;
+  }
+  if (sub !== 'sync') {
+    throw new Error(`Usage: ${brand()} feishu managed sync --path DIR --space-id <knowledge_space_xxx> [--dry-run]`);
+  }
+
+  const rawArgs = args.slice(1);
+  const initialOpts = parseManagedSync(rawArgs, loadAilyEnv(rawArgs), { requireKnowledgeSpaceId: false });
+  if (!initialOpts.path && !engine) {
+    throw new Error(`${brand()} feishu managed sync needs --path DIR when no local RBrain database is connected.`);
+  }
+  const root = initialOpts.path ? initialOpts.path : await resolveMirrorRoot(engine!, initialOpts);
+  const env = loadAilyEnv(rawArgs, root);
+  const opts = parseManagedSync(rawArgs, env);
+  const registryPath = opts.registryPath ?? defaultManagedRegistryPath(root);
+  const registry = loadManagedRegistry(registryPath);
+  const candidates = collectAilyPushCandidates(root, {
+    limit: opts.limit,
+    sourceUrlBase: opts.sourceUrlBase,
+  });
+  const previousByTitle = new Map(registry.assets.map((asset) => [asset.aily_asset_title, asset]));
+  const unchanged = new Map<string, AilyPushItemResult>();
+  const pushCandidates: AilyPushCandidate[] = [];
+  const knownExisting = registryAilyAssets(registry);
+  const startedAt = new Date().toISOString();
+
+  for (const candidate of candidates) {
+    const previous = previousByTitle.get(candidate.title);
+    const sameHash = previous?.content_sha256 === candidate.content_sha256;
+    if (sameHash && previous?.aily_asset_id && !opts.replace) {
+      unchanged.set(candidate.relative_path, {
+        ...candidate,
+        action: opts.dryRun ? 'dry_run_skip_existing' : 'skipped_existing',
+        knowledge_asset_id: previous.aily_asset_id,
+        asset_status: previous.aily_status ?? undefined,
+      });
+    } else {
+      pushCandidates.push(candidate);
+    }
+  }
+
+  const token = opts.dryRun || pushCandidates.length === 0
+    ? { token: '', source: '(not needed)' }
+    : resolveAilyApiToken(opts.tokenEnv, env);
+  const pushed = pushCandidates.length === 0
+    ? summarizeAilyPushAssets({
+        root,
+        host: opts.host,
+        knowledgeSpaceId: opts.knowledgeSpaceId,
+        dryRun: opts.dryRun,
+        replace: opts.replace,
+        assets: [],
+      })
+    : await pushAilyKnowledgeSpace({
+        root,
+        host: opts.host,
+        knowledgeSpaceId: opts.knowledgeSpaceId,
+        token: token.token,
+        sourceUrlBase: opts.sourceUrlBase,
+        replace: true,
+        dryRun: opts.dryRun,
+        candidates: pushCandidates,
+        dryRunExistingAssets: Array.from(knownExisting.values()),
+      });
+  const pushedByPath = new Map(pushed.assets.map((asset) => [asset.relative_path, asset]));
+  const assets = candidates.map((candidate) => {
+    const existing = unchanged.get(candidate.relative_path);
+    if (existing) return existing;
+    const pushedAsset = pushedByPath.get(candidate.relative_path);
+    if (!pushedAsset) {
+      return {
+        ...candidate,
+        action: 'failed' as const,
+        error: 'Candidate was not returned by managed Aily push.',
+      };
+    }
+    return pushedAsset;
+  });
+  const combinedPush = summarizeAilyPushAssets({
+    root,
+    host: opts.host,
+    knowledgeSpaceId: opts.knowledgeSpaceId,
+    dryRun: opts.dryRun,
+    replace: opts.replace,
+    assets,
+  });
+
+  const finishedAt = new Date().toISOString();
+  const record = recordManagedSyncResult(opts.dryRun ? cloneManagedRegistry(registry) : registry, {
+    source: {
+      id: opts.sourceId,
+      kind: opts.sourceKind,
+      name: opts.sourceName,
+      config_json: {
+        mirror_path: root,
+        registry_path: registryPath,
+        aily_host: opts.host,
+        aily_knowledge_space_id: opts.knowledgeSpaceId,
+        source_url_base: opts.sourceUrlBase,
+      },
+    },
+    trigger: opts.trigger,
+    started_at: startedAt,
+    finished_at: finishedAt,
+    assets: assets.map(managedObservationFromAilyAsset),
+  });
+  if (!opts.dryRun) saveManagedRegistry(registryPath, record.snapshot);
+  const baseRows = buildManagedBaseMirrorRows(record.snapshot);
+  const payload = buildManagedSyncPayload({
+    registryPath,
+    persisted: !opts.dryRun,
+    syncRun: record.sync_run,
+    push: combinedPush,
+    baseRows,
+  });
+
+  if (opts.json) {
+    console.log(JSON.stringify(payload, null, 2));
+  } else {
+    printManagedSyncResult(payload);
+    if (!opts.dryRun && pushCandidates.length > 0) console.log(`  token source: ${token.source}`);
+  }
+  if (combinedPush.failed > 0) process.exitCode = 1;
 }
 
 function printStatusResult(payload: {
@@ -4934,6 +5208,11 @@ COMMANDS
       Reads .env from the current directory, the mirror root, or --env-file.
       Existing API-created assets are skipped unless --replace is passed.
 
+  managed sync [--path DIR] [--registry FILE] [--space-id knowledge_space_xxx] [--dry-run]
+      Prototype a Feishu-native managed asset registry using local JSON state.
+      Creates/updates sources, assets, and sync_runs rows, then previews Base rows.
+      Hash-matching assets are skipped locally; changed assets update Aily by title.
+
 EXAMPLES
   ${brand()} feishu init
   ${brand()} feishu setup --path ~/rbrain-feishu
@@ -4962,6 +5241,7 @@ EXAMPLES
   ${brand()} feishu pull im-message-search --query "pricing" --sync
   ${brand()} feishu pull im-chat-messages --chat-id oc_xxx --sync
   ${brand()} feishu aily push-space --space-id knowledge_space_xxx --dry-run
+  ${brand()} feishu managed sync --path ~/rbrain-feishu --space-id knowledge_space_xxx --dry-run --json
   ${AILY_DEFAULT_TOKEN_ENV}=... ${brand()} feishu aily push-space --space-id knowledge_space_xxx
   ${brand()} feishu doctor
 `);
@@ -5014,6 +5294,10 @@ export async function runFeishu(args: string[], ctx: FeishuContext = {}): Promis
       throw new Error(`${brand()} feishu aily requires an initialized local RBrain database. Run ${brand()} init first.`);
     }
     await runAily(ctx.engine, args.slice(1));
+    return;
+  }
+  if (sub === 'managed') {
+    await runManaged(ctx.engine, args.slice(1));
     return;
   }
   if (sub === 'doctor') {
