@@ -852,16 +852,22 @@ describe('rbrain feishu command helpers', () => {
     expect(Array.from(byPath.keys()).sort()).toEqual([
       '.env.example',
       'README.md',
+      'feishu-managed-local-server.ts',
       'feishu-managed-registry.sql',
       'feishu-managed-trigger.ts',
       'package.json',
     ]);
     expect(byPath.get('feishu-managed-trigger.ts')).toContain('from "gbrain/feishu-managed"');
+    expect(byPath.get('feishu-managed-local-server.ts')).toContain("import handler from './feishu-managed-trigger.ts'");
+    expect(byPath.get('feishu-managed-local-server.ts')).toContain('Bun.serve');
     expect(byPath.get('feishu-managed-registry.sql')).toContain('feishu_managed_assets');
     expect(JSON.parse(byPath.get('package.json') ?? '{}')).toMatchObject({
       name: 'rbrain-feishu-managed-runtime',
       private: true,
       type: 'module',
+      scripts: {
+        start: 'bun run feishu-managed-local-server.ts',
+      },
       dependencies: {
         gbrain: 'github:Lostein/gbrain',
       },
@@ -871,6 +877,8 @@ describe('rbrain feishu command helpers', () => {
     expect(byPath.get('README.md')).toContain('status probe');
     expect(byPath.get('README.md')).toContain('managed deploy-plan');
     expect(byPath.get('README.md')).toContain('managed canary');
+    expect(byPath.get('README.md')).toContain('bun run start');
+    expect(byPath.get('README.md')).toContain('http://127.0.0.1:8787');
     expect(JSON.stringify(files)).not.toContain('secret-token');
     expect(JSON.stringify(files)).not.toContain('postgresql://user:secret-password');
   });
@@ -935,12 +943,14 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.files.map((file) => file.path).sort()).toEqual([
       '.env.example',
       'README.md',
+      'feishu-managed-local-server.ts',
       'feishu-managed-registry.sql',
       'feishu-managed-trigger.ts',
       'package.json',
     ]);
     expect(payload.env).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
     expect(existsSync(join(outDir, 'feishu-managed-trigger.ts'))).toBe(true);
+    expect(readFileSync(join(outDir, 'feishu-managed-local-server.ts'), 'utf-8')).toContain('Bun.serve');
     expect(readFileSync(join(outDir, 'feishu-managed-trigger.ts'), 'utf-8')).toContain('handleManagedTriggerRequest');
     expect(readFileSync(join(outDir, 'feishu-managed-registry.sql'), 'utf-8')).toContain('feishu_managed_sync_runs');
     expect(readFileSync(join(outDir, 'package.json'), 'utf-8')).toContain('github:Lostein/gbrain');

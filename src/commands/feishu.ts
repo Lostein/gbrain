@@ -6494,10 +6494,34 @@ function buildManagedDeployPackageJson(opts: ManagedDeployBundleOpts = {}): stri
     name: 'rbrain-feishu-managed-runtime',
     private: true,
     type: 'module',
+    scripts: {
+      start: 'bun run feishu-managed-local-server.ts',
+    },
     dependencies: {
       [packageName]: packageDependency,
     },
   }, null, 2)}\n`;
+}
+
+function buildManagedDeployLocalServer(): string {
+  return `import handler from './feishu-managed-trigger.ts';
+
+const rawPort = process.env.PORT ?? process.env.RBRAIN_FEISHU_MANAGED_PORT ?? '8787';
+const port = Number.parseInt(rawPort, 10);
+
+if (!Number.isFinite(port) || port <= 0) {
+  throw new Error(\`Invalid managed runtime port: \${rawPort}\`);
+}
+
+Bun.serve({
+  port,
+  async fetch(request) {
+    return handler(request);
+  },
+});
+
+console.log(\`RBrain Feishu managed runtime listening on http://127.0.0.1:\${port}\`);
+`;
 }
 
 function buildManagedDeployEnvExample(): string {
@@ -6526,6 +6550,8 @@ Miaoda or another TypeScript server-function runtime.
 - \`feishu-managed-trigger.ts\`: HTTP, scheduled sync, status, and
   refresh-status entrypoints.
   It imports \`handleManagedTriggerRequest\` from \`${opts.importSpecifier}\`.
+- \`feishu-managed-local-server.ts\`: local Bun HTTP server for deployment
+  smoke tests before uploading the trigger to a platform.
 - \`feishu-managed-registry.sql\`: Postgres DDL for managed sources, assets,
   and sync runs.
 - \`package.json\`: runtime dependency manifest that installs the package
@@ -6554,9 +6580,17 @@ rbrain feishu managed env-check --target sync --json
 rbrain feishu managed deploy-plan --url https://your-runtime.example/trigger --json
 \`\`\`
 
-5. Deploy \`feishu-managed-trigger.ts\` as the HTTP/manual and scheduled
+5. Optional local smoke test before platform deployment:
+
+\`\`\`bash
+bun install
+bun run start
+rbrain feishu managed canary --url http://127.0.0.1:8787 --status-only --json
+\`\`\`
+
+6. Deploy \`feishu-managed-trigger.ts\` as the HTTP/manual and scheduled
    server-function entrypoint.
-6. Run a status probe before enabling a full sync:
+7. Run a status probe before enabling a full sync:
 
 \`\`\`bash
 rbrain feishu managed probe --action status --json
@@ -6564,7 +6598,7 @@ rbrain feishu managed probe --action status --url https://your-runtime.example/t
 rbrain feishu managed canary --url https://your-runtime.example/trigger --status-only --json
 \`\`\`
 
-7. Run a dry-run sync probe with a small mirror root and verify:
+8. Run a dry-run sync probe with a small mirror root and verify:
 
 \`\`\`bash
 rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --json
@@ -6597,6 +6631,10 @@ export function buildManagedDeployBundleFiles(opts: ManagedDeployBundleOpts = {}
     {
       path: 'feishu-managed-trigger.ts',
       content: buildManagedTriggerTemplate({ importSpecifier }),
+    },
+    {
+      path: 'feishu-managed-local-server.ts',
+      content: buildManagedDeployLocalServer(),
     },
     {
       path: 'feishu-managed-registry.sql',
@@ -7997,7 +8035,7 @@ COMMANDS
       Print a TypeScript HTTP/scheduled trigger wrapper for managed sync/status.
 
   managed deploy-bundle [--out DIR] [--import SPECIFIER] [--dependency SPEC] [--force] [--json]
-      Write trigger, package.json, Postgres DDL, env example, and README files for deployment.
+      Write trigger, local server, package.json, Postgres DDL, env example, and README files for deployment.
 
   managed deploy-plan [--url URL] [--env-file FILE] [--target-status successful] [--json]
       Print an ordered, secret-safe deployment and verification plan.
