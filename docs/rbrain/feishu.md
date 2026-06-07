@@ -219,6 +219,15 @@ rbrain feishu managed probe --action status --url https://example.com/trigger --
 rbrain feishu managed probe --action sync --root ~/rbrain-feishu --url https://example.com/trigger --json
 ```
 
+For a one-command deployment canary, run status first and then dry-run sync:
+
+```bash
+rbrain feishu managed canary --root ~/rbrain-feishu --url https://example.com/trigger --json
+```
+
+If the status step fails, sync is skipped. Use `--status-only` when validating
+only Serverless PG and trigger reachability before wiring the mirror root.
+
 The generated template imports `handleManagedTriggerRequest` from
 `gbrain/feishu-managed`, exposes HTTP `handler`, `scheduled`, and `status`
 functions, and only names environment variables. It does not embed tokens or
