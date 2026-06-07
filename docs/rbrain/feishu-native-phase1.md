@@ -208,6 +208,8 @@ The local adapter:
   README
 - prints or POSTs status/sync trigger probes with `rbrain feishu managed probe`
   so real Miaoda deployments can be smoke-tested without hand-written JSON
+- runs `rbrain feishu managed canary` to execute status first and then dry-run
+  sync against a deployed trigger URL
 
 It is intentionally not the final managed backend. The sync path now talks to a
 registry store boundary, and both the default JSON store and the Postgres store
@@ -249,6 +251,8 @@ Local tests:
   and overwrite protection
 - managed probe coverage for status/sync request generation, dry-run default,
   HTTP POST wiring, and runtime env fallback
+- managed canary coverage for status-before-sync sequencing, dry-run default,
+  and sync skip behavior after status failure
 
 Manual platform checks:
 
@@ -279,7 +283,8 @@ Manual platform checks:
    PG connection.
 4. Deploy the generated `managed deploy-bundle` output as a real
    manual/scheduled Miaoda trigger using the same registry store.
-5. Run `managed probe --action status --url ...` and then a dry-run sync probe.
+5. Run `managed canary --url ...` or separate `managed probe` status/sync
+   checks.
 6. Verify Aily Knowledge Space reaches `successful` for a managed sync asset.
 7. Verify the Aily custom agent answers using the managed asset.
 8. Decide whether `managed sync` remains a developer fixture or becomes the

@@ -73,6 +73,7 @@ import {
   resolveManagedRegistryStoreConfig,
   runManagedSyncJob,
   runManagedTrigger,
+  runManagedTriggerCanary,
   sendManagedTriggerProbe,
 } from '../src/commands/feishu.ts';
 
@@ -338,6 +339,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('managed trigger-template [--json]');
     expect(stdout).toContain('managed deploy-bundle [--out DIR]');
     expect(stdout).toContain('managed probe [--action status|sync]');
+    expect(stdout).toContain('managed canary --url URL');
     expect(stdout).toContain('managed sql-schema [--json]');
     expect(stdout).toContain('managed provision-base --base-token TOKEN');
   });
@@ -785,6 +787,7 @@ describe('rbrain feishu command helpers', () => {
     expect(byPath.get('.env.example')).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL=');
     expect(byPath.get('.env.example')).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=');
     expect(byPath.get('README.md')).toContain('status probe');
+    expect(byPath.get('README.md')).toContain('managed canary');
     expect(JSON.stringify(files)).not.toContain('secret-token');
     expect(JSON.stringify(files)).not.toContain('postgresql://user:secret-password');
   });
@@ -920,6 +923,67 @@ describe('rbrain feishu command helpers', () => {
     expect(result.status).toBe('ok');
     expect(result.response.status).toBe(200);
     expect(result.response.json).toEqual({ action: 'status', status: 'ok' });
+  });
+
+  test('managed probe redacts Postgres URLs from remote response bodies', async () => {
+    const pgUrl = 'postgresql://user:secret-password@example.com:5432/rbrain';
+    const result = await sendManagedTriggerProbe({
+      url: 'https://runtime.example/trigger',
+      request: buildManagedTriggerProbeRequest({ action: 'status' }),
+      fetchImpl: async () => new Response(`cannot connect to ${pgUrl}`, { status: 500 }),
+    });
+
+    expect(result.status).toBe('error');
+    expect(result.response.body).not.toContain('secret-password');
+    expect(result.response.body).not.toContain(pgUrl);
+  });
+
+  test('managed canary runs status before dry-run sync', async () => {
+    const calls: Array<{ action?: string; body: Record<string, unknown> }> = [];
+    const result = await runManagedTriggerCanary({
+      url: 'https://runtime.example/trigger',
+      root: '/tmp/rbrain-feishu',
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        calls.push({ action: String(body.action), body });
+        return new Response(JSON.stringify({ action: body.action, status: 'ok' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.dry_run).toBe(true);
+    expect(calls.map((call) => call.action)).toEqual(['status', 'sync']);
+    expect((calls[1]!.body.aily as Record<string, unknown>).dryRun).toBe(true);
+    expect(result.steps.map((step) => step.status)).toEqual(['ok', 'ok']);
+  });
+
+  test('managed canary skips sync when status fails', async () => {
+    const calls: string[] = [];
+    const result = await runManagedTriggerCanary({
+      url: 'https://runtime.example/trigger',
+      root: '/tmp/rbrain-feishu',
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        calls.push(String(body.action));
+        return new Response(JSON.stringify({ status: 'error' }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+
+    expect(result.status).toBe('error');
+    expect(calls).toEqual(['status']);
+    expect(result.steps).toHaveLength(2);
+    expect(result.steps[0]!.status).toBe('error');
+    expect(result.steps[1]).toMatchObject({
+      name: 'sync',
+      status: 'skipped',
+      reason: 'status probe failed',
+    });
   });
 
   test('managed probe CLI previews a dry-run sync request', () => {

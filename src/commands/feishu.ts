@@ -5506,6 +5506,12 @@ interface ManagedTriggerProbeCliOpts extends ManagedTriggerProbeOpts {
   json: boolean;
 }
 
+interface ManagedCanaryCliOpts extends ManagedTriggerProbeOpts {
+  url: string;
+  skipSync: boolean;
+  json: boolean;
+}
+
 export interface ManagedTriggerProbeSendResult {
   status: 'ok' | 'error';
   url: string;
@@ -5516,6 +5522,21 @@ export interface ManagedTriggerProbeSendResult {
     body: string;
     json?: unknown;
   };
+}
+
+export interface ManagedTriggerCanaryStep {
+  name: ManagedTriggerAction;
+  status: 'ok' | 'error' | 'skipped';
+  request?: ManagedTriggerRequest;
+  response?: ManagedTriggerProbeSendResult['response'];
+  reason?: string;
+}
+
+export interface ManagedTriggerCanaryResult {
+  status: 'ok' | 'error';
+  url: string;
+  dry_run: boolean;
+  steps: ManagedTriggerCanaryStep[];
 }
 
 type ManagedTriggerProbeFetch = (url: string, init: RequestInit) => Promise<Response>;
@@ -5837,6 +5858,7 @@ Miaoda or another TypeScript server-function runtime.
 \`\`\`bash
 rbrain feishu managed probe --action status --json
 rbrain feishu managed probe --action status --url https://your-runtime.example/trigger --json
+rbrain feishu managed canary --url https://your-runtime.example/trigger --status-only --json
 \`\`\`
 
 6. Run a dry-run sync probe with a small mirror root and verify:
@@ -5844,6 +5866,7 @@ rbrain feishu managed probe --action status --url https://your-runtime.example/t
 \`\`\`bash
 rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --json
 rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
+rbrain feishu managed canary --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
 \`\`\`
 
 - Serverless PG has rows in \`feishu_managed_sources\`,
@@ -5933,25 +5956,44 @@ function parseManagedProbeAction(input: string | undefined): ManagedTriggerActio
   throw new Error(`--action must be one of status, sync`);
 }
 
+function parseManagedHttpUrl(raw: string | undefined, command: string, required = false): string | undefined {
+  if (!raw) {
+    if (required) throw new Error(`${brand()} feishu managed ${command} requires --url URL.`);
+    return undefined;
+  }
+  try {
+    const parsed = new URL(raw);
+    if (!/^https?:$/i.test(parsed.protocol)) throw new Error('invalid protocol');
+  } catch {
+    throw new Error(`${brand()} feishu managed ${command} --url must be an http(s) URL.`);
+  }
+  return raw;
+}
+
 function parseManagedTriggerProbe(args: string[]): ManagedTriggerProbeCliOpts {
   const action = parseManagedProbeAction(parseFlagValue(args, '--action') ?? parseFlagValue(args, '--type'));
-  const url = parseFlagValue(args, '--url');
-  if (url) {
-    try {
-      const parsed = new URL(url);
-      if (!/^https?:$/i.test(parsed.protocol)) throw new Error('invalid protocol');
-    } catch {
-      throw new Error(`${brand()} feishu managed probe --url must be an http(s) URL.`);
-    }
-  }
   return {
     action,
-    url,
+    url: parseManagedHttpUrl(parseFlagValue(args, '--url'), 'probe'),
     root: parseFlagValue(args, '--root') ? expandPath(parseFlagValue(args, '--root')!) : undefined,
     sourceId: parseFlagValue(args, '--source-id'),
     ensureSchema: !args.includes('--no-ensure-schema'),
     dryRun: !args.includes('--no-dry-run'),
     trigger: parseFlagValue(args, '--trigger') ?? 'probe',
+    json: args.includes('--json'),
+  };
+}
+
+function parseManagedCanary(args: string[]): ManagedCanaryCliOpts {
+  return {
+    action: 'sync',
+    url: parseManagedHttpUrl(parseFlagValue(args, '--url'), 'canary', true)!,
+    root: parseFlagValue(args, '--root') ? expandPath(parseFlagValue(args, '--root')!) : undefined,
+    sourceId: parseFlagValue(args, '--source-id'),
+    ensureSchema: !args.includes('--no-ensure-schema'),
+    dryRun: !args.includes('--no-dry-run'),
+    trigger: parseFlagValue(args, '--trigger') ?? 'canary',
+    skipSync: args.includes('--status-only') || args.includes('--skip-sync'),
     json: args.includes('--json'),
   };
 }
@@ -5984,6 +6026,15 @@ function parseManagedProbeResponseJson(body: string): unknown | undefined {
   }
 }
 
+function redactManagedProbeText(input: string): string {
+  return redactCommandError(redactDeep(input), [
+    process.env[MANAGED_REGISTRY_DATABASE_URL_ENV] ?? '',
+    process.env[AILY_DEFAULT_TOKEN_ENV] ?? '',
+    process.env[AILY_FALLBACK_TOKEN_ENV] ?? '',
+    process.env[MANAGED_BASE_TOKEN_ENV] ?? '',
+  ]);
+}
+
 export async function sendManagedTriggerProbe(opts: {
   url: string;
   request: ManagedTriggerRequest;
@@ -5995,7 +6046,7 @@ export async function sendManagedTriggerProbe(opts: {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(opts.request),
   });
-  const body = await response.text();
+  const body = redactManagedProbeText(await response.text());
   const json = parseManagedProbeResponseJson(body);
   return {
     status: response.ok ? 'ok' : 'error',
@@ -6008,6 +6059,103 @@ export async function sendManagedTriggerProbe(opts: {
       ...(json === undefined ? {} : { json }),
     },
   };
+}
+
+function managedCanaryStep(name: ManagedTriggerAction, probe: ManagedTriggerProbeSendResult): ManagedTriggerCanaryStep {
+  return {
+    name,
+    status: probe.status,
+    request: probe.request,
+    response: probe.response,
+  };
+}
+
+export async function runManagedTriggerCanary(opts: {
+  url: string;
+  root?: string;
+  sourceId?: string;
+  ensureSchema?: boolean;
+  dryRun?: boolean;
+  trigger?: string;
+  skipSync?: boolean;
+  fetchImpl?: ManagedTriggerProbeFetch;
+}): Promise<ManagedTriggerCanaryResult> {
+  const steps: ManagedTriggerCanaryStep[] = [];
+  const statusRequest = buildManagedTriggerProbeRequest({
+    action: 'status',
+    sourceId: opts.sourceId,
+    ensureSchema: opts.ensureSchema,
+  });
+  const statusProbe = await sendManagedTriggerProbe({
+    url: opts.url,
+    request: statusRequest,
+    fetchImpl: opts.fetchImpl,
+  });
+  steps.push(managedCanaryStep('status', statusProbe));
+
+  if (statusProbe.status !== 'ok') {
+    steps.push({
+      name: 'sync',
+      status: 'skipped',
+      reason: 'status probe failed',
+    });
+    return {
+      status: 'error',
+      url: redactDeep(opts.url),
+      dry_run: opts.dryRun ?? true,
+      steps,
+    };
+  }
+
+  if (opts.skipSync) {
+    steps.push({
+      name: 'sync',
+      status: 'skipped',
+      reason: 'sync probe skipped by --status-only',
+    });
+    return {
+      status: 'ok',
+      url: redactDeep(opts.url),
+      dry_run: opts.dryRun ?? true,
+      steps,
+    };
+  }
+
+  const syncRequest = buildManagedTriggerProbeRequest({
+    action: 'sync',
+    root: opts.root,
+    sourceId: opts.sourceId,
+    ensureSchema: opts.ensureSchema,
+    dryRun: opts.dryRun,
+    trigger: opts.trigger ?? 'canary',
+  });
+  const syncProbe = await sendManagedTriggerProbe({
+    url: opts.url,
+    request: syncRequest,
+    fetchImpl: opts.fetchImpl,
+  });
+  steps.push(managedCanaryStep('sync', syncProbe));
+
+  return {
+    status: syncProbe.status === 'ok' ? 'ok' : 'error',
+    url: redactDeep(opts.url),
+    dry_run: opts.dryRun ?? true,
+    steps,
+  };
+}
+
+function printManagedTriggerCanaryResult(payload: ManagedTriggerCanaryResult, json: boolean): void {
+  if (json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  console.log(`Feishu managed canary: ${payload.status}`);
+  console.log(`  url: ${payload.url}`);
+  console.log(`  dry-run sync: ${payload.dry_run ? 'yes' : 'no'}`);
+  for (const step of payload.steps) {
+    const detail = step.response ? `HTTP ${step.response.status}` : step.reason ?? '';
+    console.log(`  - ${step.name}: ${step.status}${detail ? ` (${detail})` : ''}`);
+  }
 }
 
 function printManagedTriggerProbePreview(request: ManagedTriggerRequest, json: boolean): void {
@@ -6046,6 +6194,13 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
   if (sub === 'deploy-bundle') {
     const opts = parseManagedDeployBundle(args.slice(1));
     printManagedDeployBundleResult(writeManagedDeployBundle(opts), opts.json);
+    return;
+  }
+  if (sub === 'canary') {
+    const opts = parseManagedCanary(args.slice(1));
+    const payload = await runManagedTriggerCanary(opts);
+    printManagedTriggerCanaryResult(payload, opts.json);
+    if (payload.status === 'error') process.exitCode = 1;
     return;
   }
   if (sub === 'probe') {
@@ -6099,7 +6254,7 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     return;
   }
   if (sub !== 'sync') {
-    throw new Error(`Usage: ${brand()} feishu managed <sync|status|base-template|trigger-template|deploy-bundle|probe|provision-base|sql-schema> [options]`);
+    throw new Error(`Usage: ${brand()} feishu managed <sync|status|base-template|trigger-template|deploy-bundle|probe|canary|provision-base|sql-schema> [options]`);
   }
 
   const rawArgs = args.slice(1);
@@ -6554,6 +6709,9 @@ COMMANDS
   managed probe [--action status|sync] [--root DIR] [--url URL] [--json]
       Print or POST a managed trigger status/sync probe. Sync probes default to dry-run.
 
+  managed canary --url URL [--root DIR] [--status-only] [--json]
+      POST status then dry-run sync probes to a deployed managed trigger.
+
   managed sql-schema [--json]
       Print the Postgres DDL for the managed sources/assets/sync_runs registry.
 
@@ -6593,6 +6751,7 @@ EXAMPLES
   ${brand()} feishu managed deploy-bundle --out ./feishu-managed-deploy --json
   ${brand()} feishu managed probe --action status --json
   ${brand()} feishu managed probe --action sync --root ~/rbrain-feishu --url https://example.com/trigger --json
+  ${brand()} feishu managed canary --root ~/rbrain-feishu --url https://example.com/trigger --json
   ${brand()} feishu managed sql-schema > feishu-managed-registry.sql
   ${brand()} feishu managed provision-base --base-token appxxx --table-name "RBrain Managed Assets" --dry-run --json
   ${brand()} feishu managed sync --path ~/rbrain-feishu --space-id knowledge_space_xxx --dry-run --json
