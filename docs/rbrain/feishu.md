@@ -204,6 +204,21 @@ The bundle writes:
 By default the command refuses to overwrite existing files. Pass `--force` only
 when replacing a generated bundle intentionally.
 
+Before or after deployment, generate the exact probe bodies:
+
+```bash
+rbrain feishu managed probe --action status --json
+rbrain feishu managed probe --action sync --root ~/rbrain-feishu --json
+```
+
+To exercise a deployed HTTP trigger, pass its URL. Sync probes default to
+`dryRun: true`; use `--no-dry-run` only after the status probe is healthy:
+
+```bash
+rbrain feishu managed probe --action status --url https://example.com/trigger --json
+rbrain feishu managed probe --action sync --root ~/rbrain-feishu --url https://example.com/trigger --json
+```
+
 The generated template imports `handleManagedTriggerRequest` from
 `gbrain/feishu-managed`, exposes HTTP `handler`, `scheduled`, and `status`
 functions, and only names environment variables. It does not embed tokens or

@@ -46,6 +46,7 @@ import {
   buildMailTriageMarkdown,
   buildMailTriageScript,
   buildManagedDeployBundleFiles,
+  buildManagedTriggerProbeRequest,
   buildMirrorReadme,
   buildMirrorGitignore,
   buildManagedTriggerTemplate,
@@ -72,6 +73,7 @@ import {
   resolveManagedRegistryStoreConfig,
   runManagedSyncJob,
   runManagedTrigger,
+  sendManagedTriggerProbe,
 } from '../src/commands/feishu.ts';
 
 const cleanupPaths: string[] = [];
@@ -335,6 +337,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('managed base-template [--json]');
     expect(stdout).toContain('managed trigger-template [--json]');
     expect(stdout).toContain('managed deploy-bundle [--out DIR]');
+    expect(stdout).toContain('managed probe [--action status|sync]');
     expect(stdout).toContain('managed sql-schema [--json]');
     expect(stdout).toContain('managed provision-base --base-token TOKEN');
   });
@@ -607,6 +610,47 @@ describe('rbrain feishu command helpers', () => {
     expect(existsSync(defaultManagedRegistryPath(root))).toBe(false);
   });
 
+  test('managed trigger can read mirror root and Base config from runtime env', async () => {
+    const root = makeTempDir('rbrain-feishu-managed-trigger-env-');
+    const dir = join(root, 'feishu', 'docs');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'roadmap.md'), '# Roadmap\n\nPlanning notes.\n', 'utf-8');
+
+    let mirroredBaseToken = '';
+    let mirroredBaseTableId = '';
+    const result = await runManagedTrigger({
+      request: {
+        action: 'sync',
+        aily: {
+          knowledgeSpaceId: 'knowledge_space_test',
+          dryRun: true,
+        },
+      },
+      env: {
+        RBRAIN_FEISHU_MIRROR_ROOT: root,
+        RBRAIN_FEISHU_MANAGED_BASE_TOKEN: 'base-secret-token',
+        RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID: 'tbl_runtime',
+      },
+      mirrorBaseRows: (opts) => {
+        mirroredBaseToken = opts.baseToken ?? '';
+        mirroredBaseTableId = opts.tableId ?? '';
+        return {
+          status: 'ok',
+          configured: true,
+          dry_run: true,
+          created: 0,
+          updated: 0,
+          failed: 0,
+          errors: [],
+        };
+      },
+    });
+
+    expect(result.status).toBe('ok');
+    expect(mirroredBaseToken).toBe('base-secret-token');
+    expect(mirroredBaseTableId).toBe('tbl_runtime');
+  });
+
   test('managed trigger HTTP handler runs dry-run sync from JSON body', async () => {
     const root = makeTempDir('rbrain-feishu-managed-http-sync-');
     const dir = join(root, 'feishu', 'docs');
@@ -817,6 +861,105 @@ describe('rbrain feishu command helpers', () => {
     expect(proc.exitCode).not.toBe(0);
     expect(proc.stderr.toString()).toContain('refuses to overwrite existing files');
     expect(readFileSync(join(outDir, 'README.md'), 'utf-8')).toBe('existing\n');
+  });
+
+  test('managed probe builds safe status and dry-run sync requests', () => {
+    const statusProbe = buildManagedTriggerProbeRequest({ action: 'status' });
+    expect(statusProbe).toEqual({
+      action: 'status',
+      registry: {
+        store: 'postgres',
+        ensureSchema: true,
+      },
+    });
+
+    const syncProbe = buildManagedTriggerProbeRequest({
+      action: 'sync',
+      root: '/tmp/rbrain-feishu',
+      sourceId: 'feishu',
+    });
+    expect(syncProbe).toEqual({
+      action: 'sync',
+      sourceId: 'feishu',
+      root: '/tmp/rbrain-feishu',
+      trigger: 'probe',
+      registry: {
+        store: 'postgres',
+        ensureSchema: true,
+      },
+      aily: {
+        dryRun: true,
+      },
+    });
+    expect(JSON.stringify(syncProbe)).not.toContain('secret-token');
+    expect(JSON.stringify(syncProbe)).not.toContain('postgresql://');
+  });
+
+  test('managed probe can POST a request with JSON headers', async () => {
+    const request = buildManagedTriggerProbeRequest({ action: 'status' });
+    let postedUrl = '';
+    let postedBody = '';
+    let postedContentType = '';
+    const result = await sendManagedTriggerProbe({
+      url: 'https://runtime.example/trigger',
+      request,
+      fetchImpl: async (url, init) => {
+        postedUrl = String(url);
+        postedBody = String(init?.body ?? '');
+        postedContentType = String((init?.headers as Record<string, string>)['content-type'] ?? '');
+        return new Response(JSON.stringify({ action: 'status', status: 'ok' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+
+    expect(postedUrl).toBe('https://runtime.example/trigger');
+    expect(postedContentType).toBe('application/json');
+    expect(JSON.parse(postedBody)).toEqual(request);
+    expect(result.status).toBe('ok');
+    expect(result.response.status).toBe(200);
+    expect(result.response.json).toEqual({ action: 'status', status: 'ok' });
+  });
+
+  test('managed probe CLI previews a dry-run sync request', () => {
+    const root = makeTempDir('rbrain-feishu-probe-preview-');
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'probe',
+        '--action',
+        'sync',
+        '--root',
+        root,
+        '--json',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      status: string;
+      request: {
+        action: string;
+        root: string;
+        registry: { store: string; ensureSchema: boolean };
+        aily: { dryRun: boolean };
+      };
+    };
+
+    expect(payload.status).toBe('preview');
+    expect(payload.request.action).toBe('sync');
+    expect(payload.request.root).toBe(root);
+    expect(payload.request.registry).toEqual({ store: 'postgres', ensureSchema: true });
+    expect(payload.request.aily.dryRun).toBe(true);
+    expect(proc.stdout.toString()).not.toContain('secret-token');
+    expect(proc.stdout.toString()).not.toContain('postgresql://');
   });
 
   test('managed registry store config defaults to JSON and redacts Postgres URLs', async () => {
