@@ -206,6 +206,22 @@ await runManagedTrigger({
 A Miaoda/server-function trigger can therefore share the same JSON/Postgres
 store behavior without spawning a local shell command.
 
+For HTTP-style server functions, wrap `handleManagedTriggerRequest` and pass the
+platform request body:
+
+```ts
+return handleManagedTriggerRequest({
+  request: {
+    method: request.method,
+    body: await request.text(),
+  },
+  env: process.env,
+});
+```
+
+The handler accepts JSON bodies shaped like `ManagedTriggerRequest`, returns
+JSON, rejects non-POST methods, and redacts PostgreSQL URLs from error output.
+
 Idempotency is registry-driven: if a candidate's hash matches the existing
 asset row, upload is skipped locally; if the hash changes, the Aily asset is
 updated by deterministic title. Secrets are not stored in the registry output.

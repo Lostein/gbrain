@@ -63,6 +63,7 @@ import {
   collectAilyPushCandidates,
   createManagedRegistryStoreHandle,
   expandPath,
+  handleManagedTriggerRequest,
   normalizeDocSlug,
   parseDocManifest,
   pushAilyKnowledgeSpace,
@@ -600,6 +601,70 @@ describe('rbrain feishu command helpers', () => {
     expect(syncPayload.sync_run.assets_seen).toBe(2);
     expect(syncPayload.aily.assets.map((asset) => asset.action)).toEqual(['dry_run_create', 'dry_run_create']);
     expect(existsSync(defaultManagedRegistryPath(root))).toBe(false);
+  });
+
+  test('managed trigger HTTP handler runs dry-run sync from JSON body', async () => {
+    const root = makeTempDir('rbrain-feishu-managed-http-sync-');
+    const dir = join(root, 'feishu', 'docs');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'roadmap.md'), '# Roadmap\n\nPlanning notes.\n', 'utf-8');
+
+    const response = await handleManagedTriggerRequest({
+      request: {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'sync',
+          root,
+          aily: {
+            knowledgeSpaceId: 'knowledge_space_test',
+            dryRun: true,
+          },
+        }),
+      },
+      env: {},
+    });
+    const payload = JSON.parse(response.body) as {
+      action: string;
+      status: string;
+      result: { sync_run: { assets_seen: number } };
+    };
+
+    expect(response.status).toBe(200);
+    expect(response.headers['content-type']).toContain('application/json');
+    expect(payload.action).toBe('sync');
+    expect(payload.status).toBe('ok');
+    expect(payload.result.sync_run.assets_seen).toBe(2);
+  });
+
+  test('managed trigger HTTP handler rejects non-POST methods and redacts errors', async () => {
+    const methodResponse = await handleManagedTriggerRequest({
+      request: { method: 'GET' },
+      env: {},
+    });
+    expect(methodResponse.status).toBe(405);
+    expect(JSON.parse(methodResponse.body).error).toContain('GET');
+
+    const pgUrl = 'postgresql://user:secret-password@example.com:5432/rbrain';
+    const errorResponse = await handleManagedTriggerRequest({
+      request: {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'status',
+          registry: {
+            store: 'postgres',
+            url: pgUrl,
+          },
+        }),
+      },
+      env: {},
+      createStoreHandle: async () => {
+        throw new Error(`cannot connect to ${pgUrl}`);
+      },
+    });
+
+    expect(errorResponse.status).toBe(400);
+    expect(errorResponse.body).not.toContain('secret-password');
+    expect(errorResponse.body).not.toContain(pgUrl);
   });
 
   test('managed registry store config defaults to JSON and redacts Postgres URLs', async () => {

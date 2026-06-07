@@ -9,7 +9,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { resolvePoolSize, resolvePrepare, resolveSessionTimeouts } from '../core/db.ts';
 import { assertValidSourceId } from '../core/source-id.ts';
 import { addSource as addBrainSource, SourceOpError } from '../core/sources-ops.ts';
-import { redactPgUrl } from '../core/url-redact.ts';
+import { redactDeep, redactPgUrl } from '../core/url-redact.ts';
 import {
   MANAGED_BASE_FIELD_NAMES,
   FEISHU_MANAGED_SQL_SCHEMA_VERSION,
@@ -5448,6 +5448,45 @@ export interface ManagedTriggerInput {
   mirrorBaseRows?: ManagedBaseMirrorRowsImpl;
 }
 
+export interface ManagedTriggerHttpRequest {
+  method?: string;
+  body?: string | ManagedTriggerRequest | null;
+}
+
+export interface ManagedTriggerHttpResponse {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+}
+
+function parseManagedTriggerHttpBody(input: string | ManagedTriggerRequest | null | undefined): ManagedTriggerRequest {
+  if (input === undefined || input === null || input === '') return {};
+  if (typeof input !== 'string') return input;
+  const parsed = JSON.parse(input) as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('managed trigger request body must be a JSON object.');
+  }
+  return parsed as ManagedTriggerRequest;
+}
+
+function managedTriggerJsonResponse(status: number, body: unknown): ManagedTriggerHttpResponse {
+  return {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+    body: JSON.stringify(body),
+  };
+}
+
+function managedTriggerHttpErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const pgRedacted = redactDeep(message);
+  return redactCommandError(pgRedacted, [
+    process.env[MANAGED_REGISTRY_DATABASE_URL_ENV] ?? '',
+    process.env[AILY_DEFAULT_TOKEN_ENV] ?? '',
+    process.env[AILY_FALLBACK_TOKEN_ENV] ?? '',
+  ]);
+}
+
 function resolveManagedTriggerRegistry(opts: {
   request?: ManagedTriggerRequest;
   env: EnvLookup;
@@ -5538,6 +5577,37 @@ export async function runManagedTrigger(input: ManagedTriggerInput = {}) {
     status: job.payload.status,
     result: job.payload,
   };
+}
+
+export async function handleManagedTriggerRequest(input: {
+  request?: ManagedTriggerHttpRequest;
+  env?: EnvLookup;
+  createStoreHandle?: typeof createManagedRegistryStoreHandle;
+  mirrorBaseRows?: ManagedBaseMirrorRowsImpl;
+} = {}): Promise<ManagedTriggerHttpResponse> {
+  const method = (input.request?.method ?? 'POST').toUpperCase();
+  if (method !== 'POST') {
+    return managedTriggerJsonResponse(405, {
+      status: 'error',
+      error: `method ${method} is not allowed`,
+    });
+  }
+
+  try {
+    const request = parseManagedTriggerHttpBody(input.request?.body);
+    const result = await runManagedTrigger({
+      request,
+      env: input.env,
+      createStoreHandle: input.createStoreHandle,
+      mirrorBaseRows: input.mirrorBaseRows,
+    });
+    return managedTriggerJsonResponse(result.status === 'partial' ? 207 : 200, result);
+  } catch (error) {
+    return managedTriggerJsonResponse(400, {
+      status: 'error',
+      error: managedTriggerHttpErrorMessage(error),
+    });
+  }
 }
 
 async function runManaged(engine: BrainEngine | undefined, args: string[]): Promise<void> {
