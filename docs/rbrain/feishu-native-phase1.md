@@ -218,6 +218,9 @@ The local adapter:
   without hand-written JSON
 - runs `rbrain feishu managed canary` to execute status first, then dry-run
   sync, then refresh-status against a deployed trigger URL
+- lets `managed canary --wait-status` poll the deployed refresh-status
+  endpoint until Aily reports the requested target state, keeping the long wait
+  in the local operator process
 
 It is intentionally not the final managed backend. The sync path now talks to a
 registry store boundary, and both the default JSON store and the Postgres store
@@ -268,7 +271,8 @@ Local tests:
 - managed probe coverage for status/sync/refresh-status request generation,
   dry-run default, HTTP POST wiring, and runtime env fallback
 - managed canary coverage for status-before-sync sequencing, refresh-status
-  after sync, dry-run default, and skip behavior after status/sync failure
+  after sync, dry-run default, wait-status polling/timeout, and skip behavior
+  after status/sync failure
 
 Manual platform checks:
 
@@ -303,10 +307,12 @@ Manual platform checks:
    PG connection.
 4. Deploy the generated `managed deploy-bundle` output as a real
    manual/scheduled Miaoda trigger using the same registry store.
-5. Run `managed env-check --target canary`, then `managed canary --url ...` or
-   separate `managed probe` status/sync/refresh-status checks.
-6. Run `managed wait-status` against the same registry store and verify Aily
-   Knowledge Space reaches `successful` for a managed sync asset.
+5. Run `managed env-check --target canary`, then
+   `managed canary --url ... --no-dry-run --wait-status` or separate
+   `managed probe` status/sync/refresh-status checks.
+6. If the trigger canary is split into separate steps, run `managed
+   wait-status` against the same registry store and verify Aily Knowledge Space
+   reaches `successful` for a managed sync asset.
 7. Verify the Base status row updates without a second content upload.
 8. Verify the Aily custom agent answers using the managed asset.
 9. Decide whether `managed sync` remains a developer fixture or becomes the

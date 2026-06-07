@@ -347,6 +347,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('managed env-check [--target status|canary|sync]');
     expect(stdout).toContain('managed probe [--action status|sync|refresh-status]');
     expect(stdout).toContain('managed canary --url URL');
+    expect(stdout).toContain('[--wait-status]');
     expect(stdout).toContain('managed sql-schema [--json]');
     expect(stdout).toContain('managed provision-registry --registry-url POSTGRES_URL');
     expect(stdout).toContain('managed provision-base --base-token TOKEN');
@@ -1158,6 +1159,127 @@ describe('rbrain feishu command helpers', () => {
     expect((calls[1]!.body.aily as Record<string, unknown>).dryRun).toBe(true);
     expect((calls[2]!.body.aily as Record<string, unknown>).dryRun).toBe(true);
     expect(result.steps.map((step) => step.status)).toEqual(['ok', 'ok', 'ok']);
+  });
+
+  test('managed canary can wait for refresh-status target state', async () => {
+    const calls: string[] = [];
+    let refreshCalls = 0;
+    let currentMs = 0;
+    const result = await runManagedTriggerCanary({
+      url: 'https://runtime.example/trigger',
+      root: '/tmp/rbrain-feishu',
+      waitStatus: true,
+      targetStatus: 'successful',
+      timeoutMs: 3_000,
+      intervalMs: 1_000,
+      now: () => currentMs,
+      sleep: async (ms) => {
+        currentMs += ms;
+      },
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        calls.push(String(body.action));
+        if (body.action === 'refresh-status') {
+          refreshCalls++;
+          const currentStatus = refreshCalls === 1 ? 'learning' : 'successful';
+          return new Response(JSON.stringify({
+            action: 'refresh-status',
+            status: 'ok',
+            result: {
+              checked: 1,
+              matched: 1,
+              missing: 0,
+              assets: [{ asset_id: 'asset_1', current_status: currentStatus }],
+            },
+          }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ action: body.action, status: 'ok' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+
+    expect(result.status).toBe('ok');
+    expect(calls).toEqual(['status', 'sync', 'refresh-status', 'refresh-status']);
+    expect(result.steps.map((step) => step.name)).toEqual(['status', 'sync', 'refresh-status', 'wait-status']);
+    expect(result.steps[3]).toMatchObject({
+      name: 'wait-status',
+      status: 'ok',
+      reason: 'target successful reached after 2 refresh attempts',
+    });
+    expect(result.steps[3]!.response?.json).toEqual({
+      action: 'refresh-status',
+      status: 'ok',
+      result: {
+        checked: 1,
+        matched: 1,
+        missing: 0,
+        assets: [{ asset_id: 'asset_1', current_status: 'successful' }],
+      },
+    });
+  });
+
+  test('managed canary reports wait-status timeout with the latest refresh response', async () => {
+    const calls: string[] = [];
+    let currentMs = 0;
+    const result = await runManagedTriggerCanary({
+      url: 'https://runtime.example/trigger',
+      root: '/tmp/rbrain-feishu',
+      waitStatus: true,
+      targetStatus: 'successful',
+      timeoutMs: 1_000,
+      intervalMs: 500,
+      now: () => currentMs,
+      sleep: async (ms) => {
+        currentMs += ms;
+      },
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        calls.push(String(body.action));
+        if (body.action === 'refresh-status') {
+          return new Response(JSON.stringify({
+            action: 'refresh-status',
+            status: 'ok',
+            result: {
+              checked: 1,
+              matched: 1,
+              missing: 0,
+              assets: [{ asset_id: 'asset_1', current_status: 'learning' }],
+            },
+          }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ action: body.action, status: 'ok' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+
+    expect(result.status).toBe('error');
+    expect(calls).toEqual(['status', 'sync', 'refresh-status', 'refresh-status', 'refresh-status']);
+    expect(result.steps.map((step) => step.name)).toEqual(['status', 'sync', 'refresh-status', 'wait-status']);
+    expect(result.steps[3]).toMatchObject({
+      name: 'wait-status',
+      status: 'error',
+      reason: 'target successful not reached after 3 refresh attempts',
+    });
+    expect(result.steps[3]!.response?.json).toEqual({
+      action: 'refresh-status',
+      status: 'ok',
+      result: {
+        checked: 1,
+        matched: 1,
+        missing: 0,
+        assets: [{ asset_id: 'asset_1', current_status: 'learning' }],
+      },
+    });
   });
 
   test('managed canary skips sync when status fails', async () => {

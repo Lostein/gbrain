@@ -6040,6 +6040,10 @@ interface ManagedTriggerProbeCliOpts extends ManagedTriggerProbeOpts {
 interface ManagedCanaryCliOpts extends ManagedTriggerProbeOpts {
   url: string;
   skipSync: boolean;
+  waitStatus: boolean;
+  targetStatus: string;
+  timeoutMs: number;
+  intervalMs: number;
   json: boolean;
 }
 
@@ -6080,8 +6084,10 @@ export interface ManagedTriggerProbeSendResult {
   };
 }
 
+export type ManagedTriggerCanaryStepName = ManagedTriggerAction | 'wait-status';
+
 export interface ManagedTriggerCanaryStep {
-  name: ManagedTriggerAction;
+  name: ManagedTriggerCanaryStepName;
   status: 'ok' | 'error' | 'skipped';
   request?: ManagedTriggerRequest;
   response?: ManagedTriggerProbeSendResult['response'];
@@ -6486,14 +6492,15 @@ rbrain feishu managed canary --url https://your-runtime.example/trigger --status
 rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --json
 rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
 rbrain feishu managed canary --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
+rbrain feishu managed canary --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --no-dry-run --wait-status --json
 rbrain feishu managed probe --action refresh-status --url https://your-runtime.example/trigger --json
 rbrain feishu managed wait-status --registry-url "$RBRAIN_FEISHU_MANAGED_DATABASE_URL" --space-id "$RBRAIN_AILY_KNOWLEDGE_SPACE_ID" --json
 \`\`\`
 
 - Serverless PG has rows in \`feishu_managed_sources\`,
   \`feishu_managed_assets\`, and \`feishu_managed_sync_runs\`.
-- Aily Knowledge Space receives the asset and eventually reports
-  \`successful\`.
+- Aily Knowledge Space receives the asset and the canary wait step or
+  \`managed wait-status\` observes it eventually reporting \`successful\`.
 - Feishu Base shows the same asset status row when Base env vars are set.
 - Refresh-status probes can observe Aily's latest asset status without
   re-uploading unchanged content.
@@ -6771,6 +6778,8 @@ function parseManagedTriggerProbe(args: string[]): ManagedTriggerProbeCliOpts {
 }
 
 function parseManagedCanary(args: string[]): ManagedCanaryCliOpts {
+  const targetStatus = parseFlagValue(args, '--target-status') ?? 'successful';
+  if (!targetStatus.trim()) throw new Error('--target-status cannot be empty');
   return {
     action: 'sync',
     url: parseManagedHttpUrl(parseFlagValue(args, '--url'), 'canary', true)!,
@@ -6780,6 +6789,10 @@ function parseManagedCanary(args: string[]): ManagedCanaryCliOpts {
     dryRun: !args.includes('--no-dry-run'),
     trigger: parseFlagValue(args, '--trigger') ?? 'canary',
     skipSync: args.includes('--status-only') || args.includes('--skip-sync'),
+    waitStatus: args.includes('--wait-status'),
+    targetStatus,
+    timeoutMs: parsePositiveIntFlag(args, '--timeout-ms') ?? 300_000,
+    intervalMs: parsePositiveIntFlag(args, '--interval-ms') ?? 15_000,
     json: args.includes('--json'),
   };
 }
@@ -6858,6 +6871,31 @@ function managedCanaryStep(name: ManagedTriggerAction, probe: ManagedTriggerProb
   };
 }
 
+function extractManagedRefreshPayload(json: unknown): Record<string, unknown> | null {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return null;
+  const obj = json as Record<string, unknown>;
+  const result = obj.result;
+  if (result && typeof result === 'object' && !Array.isArray(result)) return result as Record<string, unknown>;
+  return obj;
+}
+
+function managedRefreshProbeReachedTarget(probe: ManagedTriggerProbeSendResult, targetStatus: string): boolean {
+  const payload = extractManagedRefreshPayload(probe.response.json);
+  if (!payload) return false;
+  const checked = typeof payload.checked === 'number' ? payload.checked : 0;
+  const missing = typeof payload.missing === 'number' ? payload.missing : Number.POSITIVE_INFINITY;
+  const assets = Array.isArray(payload.assets) ? payload.assets : [];
+  return checked > 0 &&
+    missing === 0 &&
+    assets.length > 0 &&
+    assets.every((asset) => (
+      asset &&
+      typeof asset === 'object' &&
+      !Array.isArray(asset) &&
+      (asset as Record<string, unknown>).current_status === targetStatus
+    ));
+}
+
 export async function runManagedTriggerCanary(opts: {
   url: string;
   root?: string;
@@ -6866,9 +6904,17 @@ export async function runManagedTriggerCanary(opts: {
   dryRun?: boolean;
   trigger?: string;
   skipSync?: boolean;
+  waitStatus?: boolean;
+  targetStatus?: string;
+  timeoutMs?: number;
+  intervalMs?: number;
   fetchImpl?: ManagedTriggerProbeFetch;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
 }): Promise<ManagedTriggerCanaryResult> {
   const steps: ManagedTriggerCanaryStep[] = [];
+  const now = opts.now ?? (() => Date.now());
+  const sleep = opts.sleep ?? sleepMs;
   const statusRequest = buildManagedTriggerProbeRequest({
     action: 'status',
     sourceId: opts.sourceId,
@@ -6951,6 +6997,86 @@ export async function runManagedTriggerCanary(opts: {
     fetchImpl: opts.fetchImpl,
   });
   steps.push(managedCanaryStep('refresh-status', refreshProbe));
+
+  if (opts.waitStatus) {
+    const targetStatus = opts.targetStatus ?? 'successful';
+    const timeoutMs = opts.timeoutMs ?? 300_000;
+    const intervalMs = opts.intervalMs ?? 15_000;
+    const start = now();
+    let latestProbe = refreshProbe;
+    let attempts = 1;
+
+    if (latestProbe.status !== 'ok') {
+      steps.push({
+        name: 'wait-status',
+        status: 'skipped',
+        request: refreshRequest,
+        response: latestProbe.response,
+        reason: 'refresh-status probe failed',
+      });
+      return {
+        status: 'error',
+        url: redactDeep(opts.url),
+        dry_run: opts.dryRun ?? true,
+        steps,
+      };
+    }
+
+    while (!managedRefreshProbeReachedTarget(latestProbe, targetStatus)) {
+      const elapsedMs = Math.max(0, now() - start);
+      if (elapsedMs >= timeoutMs) {
+        steps.push({
+          name: 'wait-status',
+          status: 'error',
+          request: refreshRequest,
+          response: latestProbe.response,
+          reason: `target ${targetStatus} not reached after ${attempts} refresh attempts`,
+        });
+        return {
+          status: 'error',
+          url: redactDeep(opts.url),
+          dry_run: opts.dryRun ?? true,
+          steps,
+        };
+      }
+      await sleep(Math.min(intervalMs, timeoutMs - elapsedMs));
+      latestProbe = await sendManagedTriggerProbe({
+        url: opts.url,
+        request: refreshRequest,
+        fetchImpl: opts.fetchImpl,
+      });
+      attempts++;
+      if (latestProbe.status !== 'ok') {
+        steps.push({
+          name: 'wait-status',
+          status: 'error',
+          request: refreshRequest,
+          response: latestProbe.response,
+          reason: `refresh-status probe failed after ${attempts} refresh attempts`,
+        });
+        return {
+          status: 'error',
+          url: redactDeep(opts.url),
+          dry_run: opts.dryRun ?? true,
+          steps,
+        };
+      }
+    }
+
+    steps.push({
+      name: 'wait-status',
+      status: 'ok',
+      request: refreshRequest,
+      response: latestProbe.response,
+      reason: `target ${targetStatus} reached after ${attempts} refresh attempts`,
+    });
+    return {
+      status: 'ok',
+      url: redactDeep(opts.url),
+      dry_run: opts.dryRun ?? true,
+      steps,
+    };
+  }
 
   return {
     status: refreshProbe.status === 'ok' ? 'ok' : 'error',
@@ -7624,8 +7750,8 @@ COMMANDS
       Print or POST a managed trigger status/sync/refresh-status probe.
       Sync and refresh-status probes default to dry-run.
 
-  managed canary --url URL [--root DIR] [--status-only] [--json]
-      POST status, dry-run sync, then refresh-status probes to a deployed trigger.
+  managed canary --url URL [--root DIR] [--status-only] [--wait-status] [--json]
+      POST status, sync, refresh-status, and optionally wait for target status.
 
   managed sql-schema [--json]
       Print the Postgres DDL for the managed sources/assets/sync_runs registry.
@@ -7672,6 +7798,7 @@ EXAMPLES
   ${brand()} feishu managed probe --action sync --root ~/rbrain-feishu --url https://example.com/trigger --json
   ${brand()} feishu managed probe --action refresh-status --url https://example.com/trigger --json
   ${brand()} feishu managed canary --root ~/rbrain-feishu --url https://example.com/trigger --json
+  ${brand()} feishu managed canary --root ~/rbrain-feishu --url https://example.com/trigger --no-dry-run --wait-status --json
   ${brand()} feishu managed sql-schema > feishu-managed-registry.sql
   ${brand()} feishu managed provision-registry --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --json
   ${brand()} feishu managed provision-base --base-token appxxx --table-name "RBrain Managed Assets" --dry-run --json
