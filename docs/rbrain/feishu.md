@@ -153,6 +153,18 @@ store is JSON for local fixture and debugging runs; the same table contract is
 also implemented by `PostgresManagedRegistryStore` for the later Serverless PG /
 Miaoda runtime.
 
+To initialize the Postgres registry, apply the schema and read back the empty
+or existing table counts:
+
+```bash
+rbrain feishu managed provision-registry \
+  --registry-url "$RBRAIN_FEISHU_MANAGED_DATABASE_URL" \
+  --json
+```
+
+The command applies the managed DDL, reports the schema version, and redacts the
+database URL in output.
+
 To point the same sync flow at Postgres, set the managed registry store and URL:
 
 ```bash
@@ -162,9 +174,9 @@ RBRAIN_FEISHU_MANAGED_DATABASE_URL=postgresql://... \
   --registry-ensure-schema
 ```
 
-`--registry-ensure-schema` applies the DDL before reading the registry, which is
-useful for the first run against a new Serverless PG database. The URL is
-redacted in command output.
+`--registry-ensure-schema` is still supported on sync/status/trigger flows, but
+`provision-registry` is the clearer deployment preflight for a new Serverless PG
+database. The URL is redacted in command output.
 
 Before running a full sync, inspect the managed registry:
 
@@ -364,6 +376,9 @@ For Serverless PG / Miaoda storage, emit the managed registry DDL:
 
 ```bash
 rbrain feishu managed sql-schema > feishu-managed-registry.sql
+rbrain feishu managed provision-registry \
+  --registry-url "$RBRAIN_FEISHU_MANAGED_DATABASE_URL" \
+  --json
 ```
 
 The schema creates `feishu_managed_sources`, `feishu_managed_assets`, and

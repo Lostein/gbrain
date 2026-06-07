@@ -312,6 +312,12 @@ export interface ManagedRegistryStatusOpts {
   json: boolean;
 }
 
+export interface ManagedRegistryProvisionOpts extends ManagedRegistryStatusOpts {
+  registryStore: 'postgres';
+  registryUrl: string;
+  registryEnsureSchema: true;
+}
+
 export interface ManagedRefreshStatusOpts extends ManagedRegistryStatusOpts {
   host: string;
   knowledgeSpaceId: string;
@@ -910,6 +916,31 @@ function parseManagedRegistryStatus(
     path: parseFlagValue(args, '--path') ? expandPath(parseFlagValue(args, '--path')!) : undefined,
     sourceId: parseFlagValue(args, '--source-id') ?? 'feishu',
     ...resolveManagedRegistryFlags(args, env, { ...opts, command: 'status' }),
+    json: args.includes('--json'),
+  };
+}
+
+function parseManagedRegistryProvision(
+  args: string[],
+  env: EnvLookup = process.env,
+): ManagedRegistryProvisionOpts {
+  const flags = resolveManagedRegistryFlags(args, env, {
+    command: 'provision-registry',
+    requireRegistryUrl: false,
+  });
+  if (flags.registryStore !== 'postgres' || !flags.registryUrl) {
+    throw new Error(
+      `${brand()} feishu managed provision-registry requires --registry-url ` +
+      `or ${MANAGED_REGISTRY_DATABASE_URL_ENV}.`,
+    );
+  }
+  return {
+    path: parseFlagValue(args, '--path') ? expandPath(parseFlagValue(args, '--path')!) : undefined,
+    sourceId: parseFlagValue(args, '--source-id') ?? 'feishu',
+    ...flags,
+    registryStore: 'postgres',
+    registryUrl: flags.registryUrl,
+    registryEnsureSchema: true,
     json: args.includes('--json'),
   };
 }
@@ -5042,6 +5073,70 @@ export async function runManagedRegistryStatusJob(input: ManagedRegistryStatusJo
   }
 }
 
+function buildManagedRegistryProvisionPayload(opts: {
+  statusPayload: ReturnType<typeof buildManagedRegistryStatusPayload>;
+}) {
+  return {
+    status: 'ok' as const,
+    registry_store: opts.statusPayload.registry_store,
+    schema: {
+      dialect: 'postgres' as const,
+      version: FEISHU_MANAGED_SQL_SCHEMA_VERSION,
+      ensured: true,
+      tables: [
+        'feishu_managed_sources',
+        'feishu_managed_assets',
+        'feishu_managed_sync_runs',
+      ],
+    },
+    counts: opts.statusPayload.counts,
+    aily_statuses: opts.statusPayload.aily_statuses,
+    latest_sync_run: opts.statusPayload.latest_sync_run,
+    updated_at: opts.statusPayload.updated_at,
+  };
+}
+
+function printManagedRegistryProvisionResult(payload: ReturnType<typeof buildManagedRegistryProvisionPayload>): void {
+  console.log('Feishu managed registry provision: ok');
+  console.log(`  registry: ${payload.registry_store.kind} ${payload.registry_store.location}`);
+  console.log(`  schema: postgres v${payload.schema.version} ensured`);
+  console.log(
+    `  rows: ${payload.counts.sources} sources, ${payload.counts.assets} assets, ` +
+    `${payload.counts.sync_runs} sync runs`,
+  );
+}
+
+export interface ManagedRegistryProvisionJobInput {
+  root: string;
+  opts: ManagedRegistryProvisionOpts;
+  storeConfig?: ManagedRegistryStoreConfig;
+  createStoreHandle?: typeof createManagedRegistryStoreHandle;
+}
+
+export async function runManagedRegistryProvisionJob(input: ManagedRegistryProvisionJobInput) {
+  const storeConfig = input.storeConfig ?? resolveManagedRegistryStoreConfig({
+    kind: 'postgres',
+    root: input.root,
+    registryPath: input.opts.registryPath,
+    registryUrl: input.opts.registryUrl,
+    ensureSchema: true,
+  });
+  const createStoreHandle = input.createStoreHandle ?? createManagedRegistryStoreHandle;
+  const registryHandle = await createStoreHandle(storeConfig);
+  try {
+    const snapshot = await registryHandle.store.load();
+    return buildManagedRegistryProvisionPayload({
+      statusPayload: buildManagedRegistryStatusPayload({
+        snapshot,
+        registryStore: registryHandle.store,
+        schemaEnsured: true,
+      }),
+    });
+  } finally {
+    await registryHandle.close?.();
+  }
+}
+
 interface ManagedBaseMirrorWriteResult {
   status: 'preview' | 'ok' | 'partial';
   configured: boolean;
@@ -6214,7 +6309,13 @@ Miaoda or another TypeScript server-function runtime.
 
 1. Install this package in the runtime so \`${opts.importSpecifier}\` resolves.
 2. Apply \`feishu-managed-registry.sql\` to the target Serverless PG database,
-   or let the trigger create tables by sending \`registry.ensureSchema: true\`.
+   or run:
+
+\`\`\`bash
+rbrain feishu managed provision-registry --registry-url "$RBRAIN_FEISHU_MANAGED_DATABASE_URL" --json
+\`\`\`
+
+   The trigger can also create tables by sending \`registry.ensureSchema: true\`.
 3. Configure the environment variables from \`.env.example\`.
 4. Check the runtime configuration without printing secret values:
 
@@ -6807,6 +6908,22 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     }
     return;
   }
+  if (sub === 'provision-registry') {
+    const rawArgs = args.slice(1);
+    const opts = parseManagedRegistryProvision(rawArgs, loadAilyEnv(rawArgs));
+    const root = await resolveManagedRegistryRoot(engine, opts, 'provision-registry');
+    const storeConfig = resolveManagedRegistryStoreConfig({
+      kind: opts.registryStore,
+      root,
+      registryPath: opts.registryPath,
+      registryUrl: opts.registryUrl,
+      ensureSchema: true,
+    });
+    const payload = await runManagedRegistryProvisionJob({ root, opts, storeConfig });
+    if (opts.json) console.log(JSON.stringify(payload, null, 2));
+    else printManagedRegistryProvisionResult(payload);
+    return;
+  }
   if (sub === 'provision-base') {
     const payload = provisionManagedBaseTable(parseManagedBaseProvision(args.slice(1)));
     if (args.includes('--json')) console.log(JSON.stringify(payload, null, 2));
@@ -6864,7 +6981,7 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     return;
   }
   if (sub !== 'sync') {
-    throw new Error(`Usage: ${brand()} feishu managed <sync|refresh-status|status|base-template|trigger-template|deploy-bundle|env-check|probe|canary|provision-base|sql-schema> [options]`);
+    throw new Error(`Usage: ${brand()} feishu managed <sync|refresh-status|status|base-template|trigger-template|deploy-bundle|env-check|probe|canary|provision-registry|provision-base|sql-schema> [options]`);
   }
 
   const rawArgs = args.slice(1);
@@ -7334,6 +7451,9 @@ COMMANDS
   managed sql-schema [--json]
       Print the Postgres DDL for the managed sources/assets/sync_runs registry.
 
+  managed provision-registry --registry-url POSTGRES_URL [--json]
+      Apply the managed Postgres DDL and report registry counts.
+
   managed provision-base --base-token TOKEN [--table-name NAME] [--dry-run] [--json]
       Create the managed asset status table in an existing Feishu Base.
 
@@ -7374,6 +7494,7 @@ EXAMPLES
   ${brand()} feishu managed probe --action refresh-status --url https://example.com/trigger --json
   ${brand()} feishu managed canary --root ~/rbrain-feishu --url https://example.com/trigger --json
   ${brand()} feishu managed sql-schema > feishu-managed-registry.sql
+  ${brand()} feishu managed provision-registry --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --json
   ${brand()} feishu managed provision-base --base-token appxxx --table-name "RBrain Managed Assets" --dry-run --json
   ${brand()} feishu managed sync --path ~/rbrain-feishu --space-id knowledge_space_xxx --dry-run --json
   ${brand()} feishu managed refresh-status --path ~/rbrain-feishu --space-id knowledge_space_xxx --json

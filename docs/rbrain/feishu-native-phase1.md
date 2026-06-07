@@ -187,6 +187,8 @@ The local adapter:
   `rbrain feishu managed provision-base`
 - prints Postgres DDL for the managed registry with
   `rbrain feishu managed sql-schema`
+- applies and verifies the managed Postgres DDL with
+  `rbrain feishu managed provision-registry`
 - includes a `PostgresManagedRegistryStore` implementation for the same
   snapshot contract, ready to wire to a real Serverless PG / Miaoda runtime
 - lets `managed sync` select that Postgres store with
@@ -246,6 +248,8 @@ Local tests:
 - Aily create/update/skip mocked responses
 - Base mirror mocked responses
 - managed status JSON output for registry counts and latest run
+- direct `runManagedRegistryProvisionJob` coverage for schema application,
+  count readback, and Postgres URL redaction
 - direct `runManagedRefreshStatusJob` coverage for Aily status refresh,
   registry persistence, Base mirror handoff, and token redaction
 - direct `runManagedSyncJob` invocation without the CLI dispatcher
@@ -289,8 +293,9 @@ Manual platform checks:
 ## Next Implementation Tasks
 
 1. Confirm Miaoda platform access and runtime capabilities.
-2. Execute or adapt the generated Postgres DDL in the target Serverless PG /
-   Miaoda table layer.
+2. Run `managed provision-registry --registry-url ...` against the target
+   Serverless PG / Miaoda table layer, adapting the generated DDL only if the
+   platform rejects a Postgres feature.
 3. Run `managed sync --registry-store postgres` against the target Serverless
    PG connection.
 4. Deploy the generated `managed deploy-bundle` output as a real
