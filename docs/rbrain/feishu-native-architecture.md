@@ -483,8 +483,8 @@ The current local implementation should inform the online version:
 ## Recommended Next PRs
 
 1. Add this architecture doc and link it from `docs/rbrain/feishu.md`.
-2. Add a `docs/rbrain/feishu-native-mvp.md` implementation checklist if the
-   team accepts this direction.
+2. Use [`feishu-native-phase1.md`](./feishu-native-phase1.md) as the Phase 1
+   managed asset registry checklist.
 3. Add a `rbrain feishu managed push` design stub for local-to-Miaoda bridge.
 4. Prototype the Miaoda schema and sync endpoint outside the core CLI.
 5. Backport useful discoveries into `rbrain feishu aily push-space`.
