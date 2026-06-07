@@ -623,6 +623,101 @@ describe('rbrain feishu command helpers', () => {
     expect(existsSync(defaultManagedRegistryPath(root))).toBe(false);
   });
 
+  test('managed trigger can sync inline assets without a mirror root', async () => {
+    const pgUrl = 'postgresql://user:secret-password@example.com:5432/rbrain';
+    let snapshot = createEmptyManagedRegistry('2026-06-07T10:00:00.000Z');
+    let saved: unknown = null;
+    const fetchCalls: Array<{ method: string; url: string; body?: string }> = [];
+
+    const result = await runManagedTrigger({
+      request: {
+        action: 'sync',
+        trigger: 'api',
+        registry: {
+          store: 'postgres',
+          url: pgUrl,
+          ensureSchema: true,
+        },
+        aily: {
+          knowledgeSpaceId: 'knowledge_space_test',
+        },
+        assets: [{
+          sourceUri: 'https://feishu.example/doc/roadmap',
+          normalizedTextUri: 'feishu/docs/roadmap.md',
+          content: '# Roadmap\n\nOnline source text.\n',
+        }],
+      },
+      env: {
+        RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN: 'aily-secret-token',
+      },
+      createStoreHandle: async (config) => ({
+        store: {
+          kind: 'postgres',
+          location: config.location,
+          load: async () => snapshot,
+          save: async (next) => {
+            saved = next;
+            snapshot = next;
+          },
+        },
+      }),
+      fetchImpl: async (url, init) => {
+        fetchCalls.push({
+          method: String(init?.method ?? 'GET'),
+          url: String(url),
+          body: typeof init?.body === 'string' ? init.body : undefined,
+        });
+        if (String(init?.method ?? 'GET') === 'GET') {
+          return new Response(JSON.stringify({
+            status_code: '0',
+            data: { knowledge_assets: [], has_more: false },
+          }), { status: 200 });
+        }
+        return new Response(JSON.stringify({
+          status_code: '0',
+          data: {
+            knowledge_asset: {
+              knowledge_asset_id: 'knowledge_asset_inline',
+              status: 'learning',
+            },
+          },
+        }), { status: 200 });
+      },
+    });
+
+    const syncPayload = result.result as {
+      persisted: boolean;
+      registry_store: { kind: string; location: string };
+      sync_run: { assets_seen: number; assets_uploaded: number };
+      aily: { created: number; assets: Array<{ source_url: string; relative_path: string; action: string; knowledge_asset_id?: string }> };
+    };
+    expect(result.action).toBe('sync');
+    expect(result.status).toBe('ok');
+    expect(syncPayload.persisted).toBe(true);
+    expect(syncPayload.registry_store.kind).toBe('postgres');
+    expect(syncPayload.registry_store.location).not.toContain('secret-password');
+    expect(syncPayload.sync_run.assets_seen).toBe(1);
+    expect(syncPayload.sync_run.assets_uploaded).toBe(1);
+    expect(syncPayload.aily.created).toBe(1);
+    expect(syncPayload.aily.assets[0]).toMatchObject({
+      source_url: 'https://feishu.example/doc/roadmap',
+      relative_path: 'feishu/docs/roadmap.md',
+      action: 'created',
+      knowledge_asset_id: 'knowledge_asset_inline',
+    });
+    const savedSnapshot = saved as { assets: Array<Record<string, unknown>> };
+    expect(savedSnapshot.assets[0]).toMatchObject({
+      source_uri: 'https://feishu.example/doc/roadmap',
+      normalized_text_uri: 'feishu/docs/roadmap.md',
+      aily_asset_id: 'knowledge_asset_inline',
+      aily_status: 'learning',
+    });
+    expect(fetchCalls.map((call) => call.method)).toEqual(['GET', 'POST']);
+    expect(fetchCalls[1]!.body).not.toContain('aily-secret-token');
+    expect(JSON.stringify(result)).not.toContain('aily-secret-token');
+    expect(JSON.stringify(result)).not.toContain('secret-password');
+  });
+
   test('managed trigger can refresh Aily status for a server function', async () => {
     const root = makeTempDir('rbrain-feishu-managed-trigger-refresh-status-');
     const seed = recordManagedSyncResult(createEmptyManagedRegistry('2026-06-07T10:00:00.000Z'), {

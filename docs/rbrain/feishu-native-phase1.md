@@ -203,6 +203,9 @@ The local adapter:
   the same sync implementation instead of shelling out to the CLI
 - adds `runManagedTrigger` as the thin server-function adapter for `status`,
   `sync`, and `refresh-status` requests
+- lets `runManagedTrigger` sync inline normalized assets supplied in the
+  request, so a Miaoda/server-function runtime can hand off one Feishu source
+  item without first writing a local mirror file
 - adds `handleManagedTriggerRequest` for HTTP-style server functions with JSON
   request/response handling and error redaction
 - prints a deployable TypeScript wrapper with
@@ -263,7 +266,8 @@ Local tests:
   polling, timeout reporting, and persisted final status
 - direct `runManagedSyncJob` invocation without the CLI dispatcher
 - direct `runManagedTrigger` invocation for server-function `status` and `sync`
-  requests, plus `refresh-status` state refresh
+  requests, inline normalized asset sync without a mirror root, plus
+  `refresh-status` state refresh
 - HTTP trigger wrapper coverage for method rejection and PostgreSQL URL
   redaction
 - generated trigger template coverage for public import path,
@@ -286,6 +290,8 @@ Manual platform checks:
   clearly names the remaining blocked environment keys.
 - The generated `feishu-managed-local-server.ts` can serve the same trigger
   locally and answer `managed canary --status-only`.
+- A server-function `sync` request can include inline normalized assets and use
+  the Postgres registry without requiring a local mirror root.
 - `rbrain feishu managed status --registry-store postgres --registry-ensure-schema`
   can read the target Serverless PG registry.
 - Miaoda scheduled/manual trigger runs.
@@ -317,17 +323,19 @@ Manual platform checks:
    as the canonical rollout checklist for the target runtime.
 4. Run the generated local server and `managed canary --url
    http://127.0.0.1:8787 --status-only` before uploading the trigger.
-5. Run `managed sync --registry-store postgres` against the target Serverless
+5. Send one inline normalized Feishu source item through the managed trigger
+   and confirm it writes an Aily asset plus registry row.
+6. Run `managed sync --registry-store postgres` against the target Serverless
    PG connection.
-6. Deploy the generated `managed deploy-bundle` output as a real
+7. Deploy the generated `managed deploy-bundle` output as a real
    manual/scheduled Miaoda trigger using the same registry store.
-7. Run `managed env-check --target canary`, then
+8. Run `managed env-check --target canary`, then
    `managed canary --url ... --no-dry-run --wait-status` or separate
    `managed probe` status/sync/refresh-status checks.
-8. If the trigger canary is split into separate steps, run `managed
+9. If the trigger canary is split into separate steps, run `managed
    wait-status` against the same registry store and verify Aily Knowledge Space
    reaches `successful` for a managed sync asset.
-9. Verify the Base status row updates without a second content upload.
-10. Verify the Aily custom agent answers using the managed asset.
-11. Decide whether `managed sync` remains a developer fixture or becomes the
+10. Verify the Base status row updates without a second content upload.
+11. Verify the Aily custom agent answers using the managed asset.
+12. Decide whether `managed sync` remains a developer fixture or becomes the
    canonical debugging client for the online control plane.

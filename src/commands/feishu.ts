@@ -434,6 +434,16 @@ export interface AilyPushCandidate {
   source_url: string;
   bytes: number;
   content_sha256: string;
+  content?: string;
+}
+
+export interface ManagedInlineAssetInput {
+  sourceUri: string;
+  content: string;
+  title?: string;
+  normalizedTextUri?: string;
+  sourceUrl?: string;
+  ailyAssetTitle?: string;
 }
 
 export type AilyPushAction =
@@ -4663,7 +4673,39 @@ export function collectAilyPushCandidates(
   return opts.limit ? candidates.slice(0, opts.limit) : candidates;
 }
 
+function normalizeManagedInlineAssetSourceUri(value: string, index: number): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error(`managed inline asset ${index + 1} requires sourceUri.`);
+  return trimmed;
+}
+
+export function buildManagedInlineAssetCandidates(
+  assets: ManagedInlineAssetInput[],
+  opts: { limit?: number } = {},
+): AilyPushCandidate[] {
+  const limited = opts.limit ? assets.slice(0, opts.limit) : assets;
+  return limited.map((asset, index) => {
+    const sourceUri = normalizeManagedInlineAssetSourceUri(asset.sourceUri, index);
+    const content = asset.content;
+    if (typeof content !== 'string' || content.trim() === '') {
+      throw new Error(`managed inline asset ${index + 1} requires non-empty content.`);
+    }
+    const normalizedTextUri = (asset.normalizedTextUri?.trim() || sourceUri);
+    const title = asset.ailyAssetTitle?.trim() || buildAilyAssetTitle(normalizedTextUri);
+    return {
+      path: normalizedTextUri,
+      relative_path: normalizedTextUri,
+      title,
+      source_url: asset.sourceUrl?.trim() || sourceUri,
+      bytes: Buffer.byteLength(content, 'utf-8'),
+      content_sha256: createHash('sha256').update(content).digest('hex'),
+      content,
+    };
+  });
+}
+
 function readAilyCandidateContent(candidate: AilyPushCandidate): string {
+  if (candidate.content !== undefined) return candidate.content;
   if (candidate.relative_path === AILY_OVERVIEW_RELATIVE_PATH) {
     return buildAilyOverviewMarkdown();
   }
@@ -5813,6 +5855,8 @@ export interface ManagedSyncJobInput {
   root: string;
   opts: ManagedSyncOpts;
   env: EnvLookup;
+  assets?: ManagedInlineAssetInput[];
+  fetchImpl?: FetchLike;
   storeConfig?: ManagedRegistryStoreConfig;
   createStoreHandle?: typeof createManagedRegistryStoreHandle;
   mirrorBaseRows?: ManagedBaseMirrorRowsImpl;
@@ -5832,10 +5876,12 @@ export async function runManagedSyncJob(input: ManagedSyncJobInput) {
   const registryStore = registryHandle.store;
   try {
     const registry = await registryStore.load();
-    const candidates = collectAilyPushCandidates(input.root, {
-      limit: input.opts.limit,
-      sourceUrlBase: input.opts.sourceUrlBase,
-    });
+    const candidates = input.assets
+      ? buildManagedInlineAssetCandidates(input.assets, { limit: input.opts.limit })
+      : collectAilyPushCandidates(input.root, {
+          limit: input.opts.limit,
+          sourceUrlBase: input.opts.sourceUrlBase,
+        });
     const previousByTitle = new Map(registry.assets.map((asset) => [asset.aily_asset_title, asset]));
     const unchanged = new Map<string, AilyPushItemResult>();
     const pushCandidates: AilyPushCandidate[] = [];
@@ -5879,6 +5925,7 @@ export async function runManagedSyncJob(input: ManagedSyncJobInput) {
           dryRun: input.opts.dryRun,
           candidates: pushCandidates,
           dryRunExistingAssets: Array.from(knownExisting.values()),
+          fetchImpl: input.fetchImpl,
         });
     const pushedByPath = new Map(pushed.assets.map((asset) => [asset.relative_path, asset]));
     const assets = candidates.map((candidate) => {
@@ -5916,6 +5963,8 @@ export async function runManagedSyncJob(input: ManagedSyncJobInput) {
           aily_host: input.opts.host,
           aily_knowledge_space_id: input.opts.knowledgeSpaceId,
           source_url_base: input.opts.sourceUrlBase,
+          asset_input: input.assets ? 'inline' : 'mirror',
+          inline_assets: input.assets?.length,
         },
       },
       trigger: input.opts.trigger,
@@ -5958,6 +6007,7 @@ export type ManagedTriggerAction = 'status' | 'sync' | 'refresh-status';
 export interface ManagedTriggerRequest {
   action?: ManagedTriggerAction;
   root?: string;
+  assets?: ManagedInlineAssetInput[];
   sourceId?: string;
   trigger?: string;
   registry?: {
@@ -6184,6 +6234,8 @@ function resolveManagedTriggerRoot(opts: {
 }): string {
   const root = opts.request?.root ?? opts.env[MANAGED_MIRROR_ROOT_ENV];
   if (root) return expandPath(root);
+  const hasInlineAssets = Array.isArray(opts.request?.assets) && opts.request.assets.length > 0;
+  if (opts.action === 'sync' && hasInlineAssets && opts.registryStore === 'postgres') return process.cwd();
   if ((opts.action === 'status' || opts.action === 'refresh-status') && opts.registryStore === 'postgres') return process.cwd();
   throw new Error(`managed trigger ${opts.action} requires request.root.`);
 }
@@ -6197,6 +6249,11 @@ export async function runManagedTrigger(input: ManagedTriggerInput = {}) {
   const env = input.env ?? process.env;
   const action = request.action ?? 'status';
   const registry = resolveManagedTriggerRegistry({ request, env });
+  const inlineAssetsRaw = (request as { assets?: unknown }).assets;
+  if (inlineAssetsRaw !== undefined && !Array.isArray(inlineAssetsRaw)) {
+    throw new Error('managed trigger request.assets must be an array.');
+  }
+  const inlineAssets = inlineAssetsRaw as ManagedInlineAssetInput[] | undefined;
   const root = resolveManagedTriggerRoot({ action, request, env, registryStore: registry.registryStore });
   const sourceId = request.sourceId ?? 'feishu';
 
@@ -6270,6 +6327,8 @@ export async function runManagedTrigger(input: ManagedTriggerInput = {}) {
     root,
     opts,
     env,
+    assets: inlineAssets,
+    fetchImpl: input.fetchImpl,
     createStoreHandle: input.createStoreHandle,
     mirrorBaseRows: input.mirrorBaseRows,
   });
