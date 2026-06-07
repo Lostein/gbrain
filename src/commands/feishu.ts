@@ -4,9 +4,12 @@ import { homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import matter from 'gray-matter';
+import postgres from 'postgres';
 import type { BrainEngine } from '../core/engine.ts';
+import { resolvePoolSize, resolvePrepare, resolveSessionTimeouts } from '../core/db.ts';
 import { assertValidSourceId } from '../core/source-id.ts';
 import { addSource as addBrainSource, SourceOpError } from '../core/sources-ops.ts';
+import { redactPgUrl } from '../core/url-redact.ts';
 import {
   MANAGED_BASE_FIELD_NAMES,
   FEISHU_MANAGED_SQL_SCHEMA_VERSION,
@@ -16,10 +19,12 @@ import {
   buildManagedRegistrySqlSchema,
   cloneManagedRegistry,
   createJsonManagedRegistryStore,
+  createPostgresManagedRegistryStore,
   defaultManagedRegistryPath,
   recordManagedSyncResult,
   type ManagedAssetObservation,
   type ManagedBaseMirrorRow,
+  type ManagedRegistrySqlClient,
   type ManagedRegistrySnapshot,
   type ManagedRegistryStore,
   type ManagedSourceKind,
@@ -49,6 +54,8 @@ const AILY_DEFAULT_TOKEN_ENV = 'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN';
 const AILY_FALLBACK_TOKEN_ENV = 'AILY_KNOWLEDGE_SPACE_API_TOKEN';
 const AILY_DEFAULT_SPACE_ID_ENV = 'RBRAIN_AILY_KNOWLEDGE_SPACE_ID';
 const AILY_FALLBACK_SPACE_ID_ENV = 'AILY_KNOWLEDGE_SPACE_ID';
+const MANAGED_REGISTRY_STORE_ENV = 'RBRAIN_FEISHU_MANAGED_REGISTRY_STORE';
+const MANAGED_REGISTRY_DATABASE_URL_ENV = 'RBRAIN_FEISHU_MANAGED_DATABASE_URL';
 const AILY_MAX_ASSET_BYTES = 30 * 1024 * 1024;
 const AILY_OVERVIEW_RELATIVE_PATH = 'feishu/rbrain-feishu-overview.md';
 
@@ -269,6 +276,9 @@ interface AilyPushSpaceOpts {
 
 interface ManagedSyncOpts extends AilyPushSpaceOpts {
   registryPath?: string;
+  registryStore: ManagedRegistryStoreKind;
+  registryUrl?: string;
+  registryEnsureSchema: boolean;
   trigger: string;
   sourceKind: ManagedSourceKind;
   sourceName: string;
@@ -284,6 +294,8 @@ interface ManagedBaseProvisionOpts {
   dryRun: boolean;
   json: boolean;
 }
+
+type ManagedRegistryStoreKind = 'json' | 'postgres';
 
 interface FeishuContext {
   engine?: BrainEngine;
@@ -822,15 +834,36 @@ function parseManagedSourceKind(input: string | undefined): ManagedSourceKind {
   throw new Error(`--source-kind must be one of doc, drive, wiki, im, base, manual`);
 }
 
+function parseManagedRegistryStoreKind(input: string | undefined): ManagedRegistryStoreKind {
+  if (input === undefined || input === 'json') return 'json';
+  if (input === 'postgres') return 'postgres';
+  throw new Error(`--registry-store must be one of json, postgres`);
+}
+
 function parseManagedSync(
   args: string[],
   env: EnvLookup = process.env,
-  opts: { requireKnowledgeSpaceId?: boolean } = {},
+  opts: { requireKnowledgeSpaceId?: boolean; requireRegistryUrl?: boolean } = {},
 ): ManagedSyncOpts {
   const aily = parseAilyPushSpace(args, env, opts);
+  const registryUrl = parseFlagValue(args, '--registry-url') ?? env[MANAGED_REGISTRY_DATABASE_URL_ENV];
+  const explicitStore = parseFlagValue(args, '--registry-store') ?? env[MANAGED_REGISTRY_STORE_ENV];
+  const registryStore = parseManagedRegistryStoreKind(explicitStore ?? (registryUrl ? 'postgres' : 'json'));
+  if (registryStore === 'postgres' && !registryUrl && opts.requireRegistryUrl !== false) {
+    throw new Error(
+      `${brand()} feishu managed sync with --registry-store postgres requires --registry-url ` +
+      `or ${MANAGED_REGISTRY_DATABASE_URL_ENV}.`,
+    );
+  }
+  if (explicitStore === 'json' && registryUrl) {
+    throw new Error(`${brand()} feishu managed sync cannot combine --registry-store json with --registry-url.`);
+  }
   return {
     ...aily,
     registryPath: parseFlagValue(args, '--registry') ? expandPath(parseFlagValue(args, '--registry')!) : undefined,
+    registryStore,
+    registryUrl,
+    registryEnsureSchema: args.includes('--registry-ensure-schema'),
     trigger: parseFlagValue(args, '--trigger') ?? 'manual',
     sourceKind: parseManagedSourceKind(parseFlagValue(args, '--source-kind')),
     sourceName: parseFlagValue(args, '--name') ?? 'Feishu',
@@ -847,6 +880,86 @@ function parseManagedBaseProvision(args: string[]): ManagedBaseProvisionOpts {
     as: parseFlagValue(args, '--as'),
     dryRun: args.includes('--dry-run'),
     json: args.includes('--json'),
+  };
+}
+
+interface ManagedRegistryStoreConfig {
+  kind: ManagedRegistryStoreKind;
+  registryPath: string;
+  location: string;
+  postgresUrl?: string;
+  ensureSchema: boolean;
+}
+
+interface ManagedRegistryStoreHandle {
+  store: ManagedRegistryStore;
+  close?: () => Promise<void>;
+}
+
+type ManagedPostgresSqlClient = ManagedRegistrySqlClient & { end?: () => Promise<unknown> };
+type ManagedPostgresFactory = (url: string) => ManagedPostgresSqlClient;
+
+export function resolveManagedRegistryStoreConfig(opts: {
+  kind: ManagedRegistryStoreKind;
+  root: string;
+  registryPath?: string;
+  registryUrl?: string;
+  ensureSchema: boolean;
+}): ManagedRegistryStoreConfig {
+  const registryPath = opts.registryPath ?? defaultManagedRegistryPath(opts.root);
+  if (opts.kind === 'json') {
+    return {
+      kind: 'json',
+      registryPath,
+      location: registryPath,
+      ensureSchema: false,
+    };
+  }
+  if (!opts.registryUrl) {
+    throw new Error(`${brand()} feishu managed sync with postgres registry needs a database URL.`);
+  }
+  return {
+    kind: 'postgres',
+    registryPath,
+    location: redactPgUrl(opts.registryUrl),
+    postgresUrl: opts.registryUrl,
+    ensureSchema: opts.ensureSchema,
+  };
+}
+
+function createManagedPostgresSqlClient(url: string): ManagedPostgresSqlClient {
+  const prepare = resolvePrepare(url);
+  const timeouts = resolveSessionTimeouts();
+  const clientOpts: Record<string, unknown> = {
+    max: resolvePoolSize(),
+    idle_timeout: 20,
+    connect_timeout: 10,
+    types: {
+      bigint: postgres.BigInt,
+    },
+    onnotice: process.env.GBRAIN_PG_NOTICES === '1' ? undefined : () => {},
+  };
+  if (Object.keys(timeouts).length > 0) clientOpts.connection = timeouts;
+  if (typeof prepare === 'boolean') clientOpts.prepare = prepare;
+  return postgres(url, clientOpts) as unknown as ManagedPostgresSqlClient;
+}
+
+export async function createManagedRegistryStoreHandle(
+  config: ManagedRegistryStoreConfig,
+  postgresFactory: ManagedPostgresFactory = createManagedPostgresSqlClient,
+): Promise<ManagedRegistryStoreHandle> {
+  if (config.kind === 'json') {
+    return { store: createJsonManagedRegistryStore(config.registryPath) };
+  }
+
+  const sql = postgresFactory(config.postgresUrl!);
+  const store = createPostgresManagedRegistryStore(sql, config.location);
+  if (config.ensureSchema) await store.ensureSchema();
+  return {
+    store,
+    close: async () => {
+      await sql.end?.();
+    },
   };
 }
 
@@ -5040,15 +5153,27 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
   }
 
   const rawArgs = args.slice(1);
-  const initialOpts = parseManagedSync(rawArgs, loadAilyEnv(rawArgs), { requireKnowledgeSpaceId: false });
+  const initialOpts = parseManagedSync(rawArgs, loadAilyEnv(rawArgs), {
+    requireKnowledgeSpaceId: false,
+    requireRegistryUrl: false,
+  });
   if (!initialOpts.path && !engine) {
     throw new Error(`${brand()} feishu managed sync needs --path DIR when no local RBrain database is connected.`);
   }
   const root = initialOpts.path ? initialOpts.path : await resolveMirrorRoot(engine!, initialOpts);
   const env = loadAilyEnv(rawArgs, root);
   const opts = parseManagedSync(rawArgs, env);
-  const registryPath = opts.registryPath ?? defaultManagedRegistryPath(root);
-  const registryStore = createJsonManagedRegistryStore(registryPath);
+  const storeConfig = resolveManagedRegistryStoreConfig({
+    kind: opts.registryStore,
+    root,
+    registryPath: opts.registryPath,
+    registryUrl: opts.registryUrl,
+    ensureSchema: opts.registryEnsureSchema,
+  });
+  const registryPath = storeConfig.location;
+  const registryHandle = await createManagedRegistryStoreHandle(storeConfig);
+  const registryStore = registryHandle.store;
+  try {
   const registry = await registryStore.load();
   const candidates = collectAilyPushCandidates(root, {
     limit: opts.limit,
@@ -5130,6 +5255,7 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
       config_json: {
         mirror_path: root,
         registry_path: registryPath,
+        registry_store: storeConfig.kind,
         aily_host: opts.host,
         aily_knowledge_space_id: opts.knowledgeSpaceId,
         source_url_base: opts.sourceUrlBase,
@@ -5166,6 +5292,9 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     if (!opts.dryRun && pushCandidates.length > 0) console.log(`  token source: ${token.source}`);
   }
   if (combinedPush.failed > 0 || baseWrite.failed > 0) process.exitCode = 1;
+  } finally {
+    await registryHandle.close?.();
+  }
 }
 
 function printStatusResult(payload: {
@@ -5563,11 +5692,14 @@ COMMANDS
       Reads .env from the current directory, the mirror root, or --env-file.
       Existing API-created assets are skipped unless --replace is passed.
 
-  managed sync [--path DIR] [--registry FILE] [--space-id knowledge_space_xxx] [--dry-run]
+  managed sync [--path DIR] [--registry FILE] [--registry-store json|postgres]
+               [--registry-url POSTGRES_URL] [--registry-ensure-schema]
+               [--space-id knowledge_space_xxx] [--dry-run]
                [--base-token TOKEN --base-table-id TABLE]
       Prototype a Feishu-native managed asset registry using the default local JSON store.
       Creates/updates sources, assets, and sync_runs rows, then previews Base rows.
       Hash-matching assets are skipped locally; changed assets update Aily by title.
+      Set ${MANAGED_REGISTRY_DATABASE_URL_ENV} or --registry-url to use the Postgres store.
       When Base args are present, mirrors rows by Source URI via lark-cli record search/upsert.
 
   managed base-template [--json]
@@ -5611,6 +5743,7 @@ EXAMPLES
   ${brand()} feishu managed sql-schema > feishu-managed-registry.sql
   ${brand()} feishu managed provision-base --base-token appxxx --table-name "RBrain Managed Assets" --dry-run --json
   ${brand()} feishu managed sync --path ~/rbrain-feishu --space-id knowledge_space_xxx --dry-run --json
+  ${brand()} feishu managed sync --path ~/rbrain-feishu --registry-store postgres --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --registry-ensure-schema --space-id knowledge_space_xxx
   ${AILY_DEFAULT_TOKEN_ENV}=... ${brand()} feishu aily push-space --space-id knowledge_space_xxx
   ${brand()} feishu doctor
 `);

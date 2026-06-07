@@ -61,10 +61,12 @@ import {
   buildWikiSpacesMarkdown,
   buildWikiSpacesScript,
   collectAilyPushCandidates,
+  createManagedRegistryStoreHandle,
   expandPath,
   normalizeDocSlug,
   parseDocManifest,
   pushAilyKnowledgeSpace,
+  resolveManagedRegistryStoreConfig,
 } from '../src/commands/feishu.ts';
 
 const cleanupPaths: string[] = [];
@@ -321,6 +323,9 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN');
     expect(stdout).toContain('managed sync [--path DIR]');
     expect(stdout).toContain('Prototype a Feishu-native managed asset registry');
+    expect(stdout).toContain('--registry-store json|postgres');
+    expect(stdout).toContain('--registry-url POSTGRES_URL');
+    expect(stdout).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
     expect(stdout).toContain('managed base-template [--json]');
     expect(stdout).toContain('managed sql-schema [--json]');
     expect(stdout).toContain('managed provision-base --base-token TOKEN');
@@ -488,6 +493,48 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.aily.assets[0]!.relative_path).toBe('feishu/rbrain-feishu-overview.md');
     expect(payload.base_mirror.rows).toBe(2);
     expect(existsSync(payload.registry_path)).toBe(false);
+  });
+
+  test('managed registry store config defaults to JSON and redacts Postgres URLs', async () => {
+    const root = makeTempDir('rbrain-feishu-managed-store-');
+    const jsonConfig = resolveManagedRegistryStoreConfig({
+      kind: 'json',
+      root,
+      ensureSchema: true,
+    });
+    expect(jsonConfig).toEqual({
+      kind: 'json',
+      registryPath: join(root, '.rbrain-managed', 'registry.json'),
+      location: join(root, '.rbrain-managed', 'registry.json'),
+      ensureSchema: false,
+    });
+
+    const pgUrl = 'postgresql://user:secret-password@example.com:5432/rbrain';
+    const pgConfig = resolveManagedRegistryStoreConfig({
+      kind: 'postgres',
+      root,
+      registryUrl: pgUrl,
+      ensureSchema: true,
+    });
+    expect(pgConfig.location).toBe('postgresql://***@example.com:5432/rbrain');
+    expect(pgConfig.location).not.toContain('secret-password');
+
+    let createdWithUrl = '';
+    let closed = false;
+    const fakeSql = (async () => []) as any;
+    fakeSql.unsafe = async () => [];
+    fakeSql.end = async () => { closed = true; };
+    fakeSql.json = (value: unknown) => ({ json: value });
+    const handle = await createManagedRegistryStoreHandle(pgConfig, (url) => {
+      createdWithUrl = url;
+      return fakeSql;
+    });
+
+    expect(createdWithUrl).toBe(pgUrl);
+    expect(handle.store.kind).toBe('postgres');
+    expect(handle.store.location).toBe(pgConfig.location);
+    await handle.close?.();
+    expect(closed).toBe(true);
   });
 
   test('managed base-template prints the status table field contract', () => {

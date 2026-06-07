@@ -153,6 +153,19 @@ store is JSON for local fixture and debugging runs; the same table contract is
 also implemented by `PostgresManagedRegistryStore` for the later Serverless PG /
 Miaoda runtime.
 
+To point the same sync flow at Postgres, set the managed registry store and URL:
+
+```bash
+RBRAIN_FEISHU_MANAGED_DATABASE_URL=postgresql://... \
+  rbrain feishu managed sync --path ~/rbrain-feishu \
+  --registry-store postgres \
+  --registry-ensure-schema
+```
+
+`--registry-ensure-schema` applies the DDL before reading the registry, which is
+useful for the first run against a new Serverless PG database. The URL is
+redacted in command output.
+
 Idempotency is registry-driven: if a candidate's hash matches the existing
 asset row, upload is skipped locally; if the hash changes, the Aily asset is
 updated by deterministic title. Secrets are not stored in the registry output.
@@ -193,9 +206,9 @@ rbrain feishu managed sql-schema > feishu-managed-registry.sql
 The schema creates `feishu_managed_sources`, `feishu_managed_assets`, and
 `feishu_managed_sync_runs` with the same fields used by the local JSON registry,
 plus uniqueness constraints for `(source_id, source_uri)` and deterministic Aily
-asset titles. `PostgresManagedRegistryStore` reads and writes that schema; the
-CLI still defaults to JSON until the online runtime and connection configuration
-are wired.
+asset titles. `PostgresManagedRegistryStore` reads and writes that schema, and
+`managed sync` can select it with `--registry-store postgres` plus
+`--registry-url` or `RBRAIN_FEISHU_MANAGED_DATABASE_URL`.
 
 For the proposed Feishu-native managed architecture, where Aily Knowledge Space
 is the runtime knowledge backend, Miaoda hosts the online control plane, and
