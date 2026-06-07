@@ -155,7 +155,7 @@ describe('rbrain feishu smoke', () => {
       status: 'ok';
       dry_run: boolean;
       candidates: number;
-      assets: Array<{ action: string; title: string }>;
+      assets: Array<{ action: string; relative_path: string; title: string }>;
     }>(runRbrain([
       'feishu',
       'aily',
@@ -164,9 +164,12 @@ describe('rbrain feishu smoke', () => {
       '--json',
     ], { home, fakeBin }));
     expect(ailyDryRun.dry_run).toBe(true);
-    expect(ailyDryRun.candidates).toBe(1);
+    expect(ailyDryRun.candidates).toBe(2);
     expect(ailyDryRun.assets[0]!.action).toBe('dry_run_create');
+    expect(ailyDryRun.assets[0]!.relative_path).toBe('feishu/rbrain-feishu-overview.md');
     expect(ailyDryRun.assets[0]!.title).toMatch(/\.txt$/);
+    expect(ailyDryRun.assets[1]!.action).toBe('dry_run_create');
+    expect(ailyDryRun.assets[1]!.relative_path).toMatch(/^feishu\/calendar\//);
 
     const search = runRbrain(['search', 'planning', '--source', 'feishu', '--limit', '5'], { home, fakeBin });
     expect(search.code, search.stderr).toBe(0);

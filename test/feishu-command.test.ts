@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { withEnv } from './helpers/with-env.ts';
 import {
   FEISHU_DOCTOR_CAPABILITY_CHECKS,
   FEISHU_MIRROR_DIRS,
@@ -108,10 +109,8 @@ describe('rbrain feishu command helpers', () => {
     expect(ids).toContain('collector:im-message-search');
   });
 
-  test('README points users at the rbrain source setup path', () => {
-    const prev = process.env.RBRAIN_MODE;
-    process.env.RBRAIN_MODE = '1';
-    try {
+  test('README points users at the rbrain source setup path', async () => {
+    await withEnv({ RBRAIN_MODE: '1' }, () => {
       const body = buildMirrorReadme('/tmp/rbrain-feishu');
       expect(body).toContain('rbrain feishu setup --path "/tmp/rbrain-feishu"');
       expect(body).toContain('rbrain sync --source feishu');
@@ -131,10 +130,7 @@ describe('rbrain feishu command helpers', () => {
       expect(body).toContain('refresh-feishu.sh');
       expect(body).toContain('feishu aily push-space --space-id knowledge_space_xxx --dry-run');
       expect(body).toContain('copy `.env.aily.example` to `.env`');
-    } finally {
-      if (prev === undefined) delete process.env.RBRAIN_MODE;
-      else process.env.RBRAIN_MODE = prev;
-    }
+    });
   });
 
   test('mirror env templates keep real Aily secrets out of Git', () => {
@@ -164,19 +160,14 @@ describe('rbrain feishu command helpers', () => {
     expect(body).toContain('commit_snapshot "$OUT" "feishu: update doc $SLUG"');
   });
 
-  test('docs-list script delegates to rbrain with a manifest file', () => {
-    const prev = process.env.RBRAIN_MODE;
-    process.env.RBRAIN_MODE = '1';
-    try {
+  test('docs-list script delegates to rbrain with a manifest file', async () => {
+    await withEnv({ RBRAIN_MODE: '1' }, () => {
       const script = buildDocListScript('/tmp/rbrain-feishu');
       const manifest = buildDocListManifestTemplate();
       expect(script).toContain('feishu pull docs-list --path "$ROOT" --source-id "$SOURCE_ID" --file "$FILE"');
       expect(script).toContain('FILE="${1:-$ROOT/feishu/docs/docs-list.tsv}"');
       expect(manifest).toContain('<feishu-doc-url-or-token><TAB><slug>');
-    } finally {
-      if (prev === undefined) delete process.env.RBRAIN_MODE;
-      else process.env.RBRAIN_MODE = prev;
-    }
+    });
   });
 
   test('minutes script writes feishu-minutes markdown with provenance', () => {
@@ -286,18 +277,13 @@ describe('rbrain feishu command helpers', () => {
     expect(body).toContain('commit_snapshot "$OUT" "feishu: update tasks $DAY"');
   });
 
-  test('refresh script delegates to rbrain feishu refresh for the mirror', () => {
-    const prev = process.env.RBRAIN_MODE;
-    process.env.RBRAIN_MODE = '1';
-    try {
+  test('refresh script delegates to rbrain feishu refresh for the mirror', async () => {
+    await withEnv({ RBRAIN_MODE: '1' }, () => {
       const body = buildRefreshScript('/tmp/rbrain-feishu');
       expect(body).toContain('RBRAIN_BIN="${RBRAIN_BIN:-rbrain}"');
       expect(body).toContain('feishu refresh --path "$ROOT" --source-id "$SOURCE_ID"');
       expect(body).toContain('ROOT="/tmp/rbrain-feishu"');
-    } finally {
-      if (prev === undefined) delete process.env.RBRAIN_MODE;
-      else process.env.RBRAIN_MODE = prev;
-    }
+    });
   });
 
   test('help path includes daily refresh command', async () => {
