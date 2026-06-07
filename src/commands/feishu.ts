@@ -22,6 +22,7 @@ import {
   createPostgresManagedRegistryStore,
   defaultManagedRegistryPath,
   recordManagedSyncResult,
+  type ManagedAssetRow,
   type ManagedAssetObservation,
   type ManagedBaseMirrorRow,
   type ManagedRegistrySqlClient,
@@ -309,6 +310,17 @@ export interface ManagedRegistryStatusOpts {
   registryUrl?: string;
   registryEnsureSchema: boolean;
   json: boolean;
+}
+
+export interface ManagedRefreshStatusOpts extends ManagedRegistryStatusOpts {
+  host: string;
+  knowledgeSpaceId: string;
+  tokenEnv: string;
+  dryRun: boolean;
+  limit?: number;
+  baseToken?: string;
+  baseTableId?: string;
+  baseAs?: string;
 }
 
 interface ManagedBaseProvisionOpts {
@@ -917,6 +929,28 @@ function parseManagedSync(
     baseToken: parseFlagValue(args, '--base-token'),
     baseTableId: parseFlagValue(args, '--base-table-id'),
     baseAs: parseFlagValue(args, '--base-as'),
+  };
+}
+
+function parseManagedRefreshStatus(
+  args: string[],
+  env: EnvLookup = process.env,
+  opts: { requireKnowledgeSpaceId?: boolean; requireRegistryUrl?: boolean } = {},
+): ManagedRefreshStatusOpts {
+  const aily = parseAilyPushSpace(args, env, opts);
+  return {
+    path: aily.path,
+    sourceId: aily.sourceId,
+    host: aily.host,
+    knowledgeSpaceId: aily.knowledgeSpaceId,
+    tokenEnv: aily.tokenEnv,
+    dryRun: aily.dryRun,
+    limit: aily.limit,
+    ...resolveManagedRegistryFlags(args, env, { ...opts, command: 'refresh-status' }),
+    baseToken: parseFlagValue(args, '--base-token'),
+    baseTableId: parseFlagValue(args, '--base-table-id'),
+    baseAs: parseFlagValue(args, '--base-as'),
+    json: aily.json,
   };
 }
 
@@ -5278,6 +5312,261 @@ function mirrorManagedBaseRows(opts: {
 
 type ManagedBaseMirrorRowsImpl = typeof mirrorManagedBaseRows;
 
+type ManagedRefreshStatusMatch = 'id' | 'title' | 'none';
+
+export interface ManagedRefreshStatusAssetResult {
+  id: string;
+  source_id: string;
+  source_uri: string;
+  title: string;
+  aily_asset_title: string;
+  previous_aily_asset_id: string | null;
+  current_aily_asset_id: string | null;
+  previous_status: string | null;
+  current_status: string | null;
+  matched: boolean;
+  matched_by: ManagedRefreshStatusMatch;
+  changed: boolean;
+}
+
+function ailyAssetStatus(asset: AilyAssetRow | undefined): string {
+  if (!asset) return 'missing';
+  return asset.status ?? 'unknown';
+}
+
+function indexAilyAssets(assets: AilyAssetRow[]): {
+  byId: Map<string, AilyAssetRow>;
+  byTitle: Map<string, AilyAssetRow>;
+} {
+  const byId = new Map<string, AilyAssetRow>();
+  const byTitle = new Map<string, AilyAssetRow>();
+  for (const asset of assets) {
+    if (asset.knowledge_asset_id && !byId.has(asset.knowledge_asset_id)) {
+      byId.set(asset.knowledge_asset_id, asset);
+    }
+    const title = ailyAssetName(asset);
+    if (title && !byTitle.has(title)) byTitle.set(title, asset);
+  }
+  return { byId, byTitle };
+}
+
+function refreshManagedRegistryAilyStatuses(opts: {
+  snapshot: ManagedRegistrySnapshot;
+  sourceId: string;
+  ailyAssets: AilyAssetRow[];
+  now: string;
+  limit?: number;
+}): {
+  snapshot: ManagedRegistrySnapshot;
+  assets: ManagedRefreshStatusAssetResult[];
+  checked: number;
+  matched: number;
+  missing: number;
+  updated: number;
+  aily_statuses: Record<string, number>;
+} {
+  const next = cloneManagedRegistry(opts.snapshot);
+  const { byId, byTitle } = indexAilyAssets(opts.ailyAssets);
+  const targetAssets = next.assets
+    .filter((asset) => asset.source_id === opts.sourceId)
+    .sort((a, b) => a.source_uri.localeCompare(b.source_uri))
+    .slice(0, opts.limit ?? undefined);
+
+  const assets: ManagedRefreshStatusAssetResult[] = [];
+  let matched = 0;
+  let missing = 0;
+  let updated = 0;
+
+  for (const asset of targetAssets) {
+    const previousAssetId = asset.aily_asset_id;
+    const previousStatus = asset.aily_status;
+    let observed: AilyAssetRow | undefined;
+    let matchedBy: ManagedRefreshStatusMatch = 'none';
+    if (asset.aily_asset_id) {
+      observed = byId.get(asset.aily_asset_id);
+      if (observed) matchedBy = 'id';
+    }
+    if (!observed) {
+      observed = byTitle.get(asset.aily_asset_title);
+      if (observed) matchedBy = 'title';
+    }
+
+    const currentAssetId = observed?.knowledge_asset_id ?? asset.aily_asset_id;
+    const currentStatus = ailyAssetStatus(observed);
+    const changed =
+      previousAssetId !== (currentAssetId ?? null) ||
+      previousStatus !== currentStatus;
+    if (changed) {
+      asset.aily_asset_id = currentAssetId ?? null;
+      asset.aily_status = currentStatus;
+      asset.updated_at = opts.now;
+      updated++;
+    }
+    if (observed) matched++;
+    else missing++;
+    assets.push({
+      id: asset.id,
+      source_id: asset.source_id,
+      source_uri: asset.source_uri,
+      title: asset.title,
+      aily_asset_title: asset.aily_asset_title,
+      previous_aily_asset_id: previousAssetId,
+      current_aily_asset_id: currentAssetId ?? null,
+      previous_status: previousStatus,
+      current_status: currentStatus,
+      matched: Boolean(observed),
+      matched_by: matchedBy,
+      changed,
+    });
+  }
+
+  if (updated > 0) next.updated_at = opts.now;
+  return {
+    snapshot: next,
+    assets,
+    checked: targetAssets.length,
+    matched,
+    missing,
+    updated,
+    aily_statuses: countManagedAilyStatuses(next),
+  };
+}
+
+function buildManagedRefreshStatusPayload(opts: {
+  registryPath: string;
+  registryStore: ManagedRegistryStore;
+  persisted: boolean;
+  dryRun: boolean;
+  knowledgeSpaceId: string;
+  ailyAssetsSeen: number;
+  refresh: ReturnType<typeof refreshManagedRegistryAilyStatuses>;
+  baseRows: ManagedBaseMirrorRow[];
+  baseWrite: ManagedBaseMirrorWriteResult;
+}) {
+  return {
+    status: opts.refresh.missing > 0 ? 'partial' : 'ok',
+    dry_run: opts.dryRun,
+    persisted: opts.persisted,
+    registry_path: opts.registryPath,
+    registry_store: {
+      kind: opts.registryStore.kind,
+      location: opts.registryStore.location,
+    },
+    knowledge_space_id: opts.knowledgeSpaceId,
+    aily_assets_seen: opts.ailyAssetsSeen,
+    checked: opts.refresh.checked,
+    matched: opts.refresh.matched,
+    missing: opts.refresh.missing,
+    updated: opts.refresh.updated,
+    aily_statuses: opts.refresh.aily_statuses,
+    assets: opts.refresh.assets,
+    base_mirror: {
+      status: opts.baseWrite.status,
+      configured: opts.baseWrite.configured,
+      dry_run: opts.baseWrite.dry_run,
+      rows: opts.baseRows.length,
+      created: opts.baseWrite.created,
+      updated: opts.baseWrite.updated,
+      failed: opts.baseWrite.failed,
+      errors: opts.baseWrite.errors,
+      preview: opts.baseRows.slice(0, 20),
+    },
+  };
+}
+
+function printManagedRefreshStatusResult(payload: ReturnType<typeof buildManagedRefreshStatusPayload>): void {
+  console.log(`Feishu managed Aily status refresh: ${payload.status}`);
+  console.log(`  registry: ${payload.registry_path}${payload.persisted ? '' : ' (not written)'}`);
+  console.log(
+    `  Aily: ${payload.aily_assets_seen} remote assets, ${payload.checked} checked, ` +
+    `${payload.matched} matched, ${payload.missing} missing`,
+  );
+  const statuses = Object.entries(payload.aily_statuses)
+    .map(([status, count]) => `${status}=${count}`)
+    .join(', ');
+  console.log(`  statuses: ${statuses || 'none'}`);
+  console.log(
+    `  Base mirror: ${payload.base_mirror.status}, ${payload.base_mirror.rows} rows, ` +
+    `${payload.base_mirror.created} created, ${payload.base_mirror.updated} updated, ` +
+    `${payload.base_mirror.failed} failed`,
+  );
+}
+
+export interface ManagedRefreshStatusJobInput {
+  root: string;
+  opts: ManagedRefreshStatusOpts;
+  env: EnvLookup;
+  storeConfig?: ManagedRegistryStoreConfig;
+  createStoreHandle?: typeof createManagedRegistryStoreHandle;
+  mirrorBaseRows?: ManagedBaseMirrorRowsImpl;
+  fetchImpl?: FetchLike;
+}
+
+export async function runManagedRefreshStatusJob(input: ManagedRefreshStatusJobInput) {
+  const storeConfig = input.storeConfig ?? resolveManagedRegistryStoreConfig({
+    kind: input.opts.registryStore,
+    root: input.root,
+    registryPath: input.opts.registryPath,
+    registryUrl: input.opts.registryUrl,
+    ensureSchema: input.opts.registryEnsureSchema,
+  });
+  const registryPath = storeConfig.location;
+  const createStoreHandle = input.createStoreHandle ?? createManagedRegistryStoreHandle;
+  const registryHandle = await createStoreHandle(storeConfig);
+  const registryStore = registryHandle.store;
+  try {
+    const registry = await registryStore.load();
+    const sourceAssets = registry.assets.filter((asset) => asset.source_id === input.opts.sourceId);
+    const needsToken = sourceAssets.length > 0;
+    const token = needsToken
+      ? resolveAilyApiToken(input.opts.tokenEnv, input.env)
+      : { token: '', source: '(not needed)' };
+    const ailyAssets = needsToken
+      ? await listAilyKnowledgeAssets({
+          host: input.opts.host,
+          knowledgeSpaceId: input.opts.knowledgeSpaceId,
+          token: token.token,
+          fetchImpl: input.fetchImpl,
+        })
+      : [];
+    const refresh = refreshManagedRegistryAilyStatuses({
+      snapshot: registry,
+      sourceId: input.opts.sourceId,
+      ailyAssets,
+      now: new Date().toISOString(),
+      limit: input.opts.limit,
+    });
+    if (!input.opts.dryRun && refresh.updated > 0) await registryStore.save(refresh.snapshot);
+    const baseRows = buildManagedBaseMirrorRows(refresh.snapshot);
+    const mirrorBaseRows = input.mirrorBaseRows ?? mirrorManagedBaseRows;
+    const baseWrite = mirrorBaseRows({
+      rows: baseRows,
+      baseToken: input.opts.baseToken,
+      tableId: input.opts.baseTableId,
+      as: input.opts.baseAs,
+      dryRun: input.opts.dryRun,
+    });
+    const payload = buildManagedRefreshStatusPayload({
+      registryPath,
+      registryStore,
+      persisted: !input.opts.dryRun && refresh.updated > 0,
+      dryRun: input.opts.dryRun,
+      knowledgeSpaceId: input.opts.knowledgeSpaceId,
+      ailyAssetsSeen: ailyAssets.length,
+      refresh,
+      baseRows,
+      baseWrite,
+    });
+
+    return {
+      payload,
+      tokenSource: token.source,
+    };
+  } finally {
+    await registryHandle.close?.();
+  }
+}
+
 export interface ManagedSyncJobInput {
   root: string;
   opts: ManagedSyncOpts;
@@ -5422,7 +5711,7 @@ export async function runManagedSyncJob(input: ManagedSyncJobInput) {
   }
 }
 
-export type ManagedTriggerAction = 'status' | 'sync';
+export type ManagedTriggerAction = 'status' | 'sync' | 'refresh-status';
 
 export interface ManagedTriggerRequest {
   action?: ManagedTriggerAction;
@@ -5460,6 +5749,7 @@ export interface ManagedTriggerInput {
   env?: EnvLookup;
   createStoreHandle?: typeof createManagedRegistryStoreHandle;
   mirrorBaseRows?: ManagedBaseMirrorRowsImpl;
+  fetchImpl?: FetchLike;
 }
 
 export interface ManagedTriggerHttpRequest {
@@ -5615,7 +5905,7 @@ function resolveManagedTriggerRoot(opts: {
 }): string {
   const root = opts.request?.root ?? opts.env[MANAGED_MIRROR_ROOT_ENV];
   if (root) return expandPath(root);
-  if (opts.action === 'status' && opts.registryStore === 'postgres') return process.cwd();
+  if ((opts.action === 'status' || opts.action === 'refresh-status') && opts.registryStore === 'postgres') return process.cwd();
   throw new Error(`managed trigger ${opts.action} requires request.root.`);
 }
 
@@ -5652,26 +5942,50 @@ export async function runManagedTrigger(input: ManagedTriggerInput = {}) {
 
   const knowledgeSpaceId = resolveManagedTriggerKnowledgeSpaceId(request, env);
   if (!knowledgeSpaceId) {
-    throw new Error(`managed trigger sync requires a knowledge space id.`);
+    throw new Error(`managed trigger ${action} requires a knowledge space id.`);
   }
-  const opts: ManagedSyncOpts = {
+  const commonAily = {
     path: root,
     sourceId,
     host: normalizeAilyHost(request.aily?.host ?? env.RBRAIN_AILY_HOST ?? env.AILY_HOST ?? AILY_DEFAULT_HOST),
     knowledgeSpaceId,
     tokenEnv: request.aily?.tokenEnv ?? AILY_DEFAULT_TOKEN_ENV,
-    sourceUrlBase: normalizeAilyHost(request.aily?.sourceUrlBase ?? AILY_DEFAULT_SOURCE_URL_BASE),
-    limit: request.aily?.limit,
-    replace: request.aily?.replace ?? false,
     dryRun: request.aily?.dryRun ?? false,
     json: true,
     ...registry,
-    trigger: request.trigger ?? 'api',
-    sourceKind: request.source?.kind ?? 'manual',
-    sourceName: request.source?.name ?? 'Feishu',
     baseToken: request.base?.token ?? env[MANAGED_BASE_TOKEN_ENV],
     baseTableId: request.base?.tableId ?? env[MANAGED_BASE_TABLE_ID_ENV],
     baseAs: request.base?.as ?? env[MANAGED_BASE_AS_ENV],
+  };
+
+  if (action === 'refresh-status') {
+    const opts: ManagedRefreshStatusOpts = {
+      ...commonAily,
+      limit: request.aily?.limit,
+    };
+    const job = await runManagedRefreshStatusJob({
+      root,
+      opts,
+      env,
+      createStoreHandle: input.createStoreHandle,
+      mirrorBaseRows: input.mirrorBaseRows,
+      fetchImpl: input.fetchImpl,
+    });
+    return {
+      action,
+      status: job.payload.status,
+      result: job.payload,
+    };
+  }
+
+  const opts: ManagedSyncOpts = {
+    ...commonAily,
+    sourceUrlBase: normalizeAilyHost(request.aily?.sourceUrlBase ?? AILY_DEFAULT_SOURCE_URL_BASE),
+    limit: request.aily?.limit,
+    replace: request.aily?.replace ?? false,
+    trigger: request.trigger ?? 'api',
+    sourceKind: request.source?.kind ?? 'manual',
+    sourceName: request.source?.name ?? 'Feishu',
   };
   const job = await runManagedSyncJob({
     root,
@@ -5692,6 +6006,7 @@ export async function handleManagedTriggerRequest(input: {
   env?: EnvLookup;
   createStoreHandle?: typeof createManagedRegistryStoreHandle;
   mirrorBaseRows?: ManagedBaseMirrorRowsImpl;
+  fetchImpl?: FetchLike;
 } = {}): Promise<ManagedTriggerHttpResponse> {
   const method = (input.request?.method ?? 'POST').toUpperCase();
   if (method !== 'POST') {
@@ -5708,6 +6023,7 @@ export async function handleManagedTriggerRequest(input: {
       env: input.env,
       createStoreHandle: input.createStoreHandle,
       mirrorBaseRows: input.mirrorBaseRows,
+      fetchImpl: input.fetchImpl,
     });
     return managedTriggerJsonResponse(result.status === 'partial' ? 207 : 200, result);
   } catch (error) {
@@ -5805,6 +6121,29 @@ export async function status(): Promise<Response> {
   });
   return toWebResponse(response);
 }
+
+export async function refreshStatus(): Promise<Response> {
+  const env = runtimeEnv();
+  const response = await handleManagedTriggerRequest({
+    request: {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'refresh-status',
+        registry: postgresRegistry(env),
+        aily: {
+          knowledgeSpaceId: env.RBRAIN_AILY_KNOWLEDGE_SPACE_ID,
+          tokenEnv: 'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN',
+        },
+        base: {
+          token: env.RBRAIN_FEISHU_MANAGED_BASE_TOKEN,
+          tableId: env.RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID,
+        },
+      }),
+    },
+    env,
+  });
+  return toWebResponse(response);
+}
 `;
 }
 
@@ -5863,7 +6202,8 @@ Miaoda or another TypeScript server-function runtime.
 
 ## Files
 
-- \`feishu-managed-trigger.ts\`: HTTP, scheduled sync, and status entrypoints.
+- \`feishu-managed-trigger.ts\`: HTTP, scheduled sync, status, and
+  refresh-status entrypoints.
   It imports \`handleManagedTriggerRequest\` from \`${opts.importSpecifier}\`.
 - \`feishu-managed-registry.sql\`: Postgres DDL for managed sources, assets,
   and sync runs.
@@ -5899,6 +6239,7 @@ rbrain feishu managed canary --url https://your-runtime.example/trigger --status
 rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --json
 rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
 rbrain feishu managed canary --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
+rbrain feishu managed probe --action refresh-status --url https://your-runtime.example/trigger --json
 \`\`\`
 
 - Serverless PG has rows in \`feishu_managed_sources\`,
@@ -5906,6 +6247,8 @@ rbrain feishu managed canary --root /tmp/rbrain-feishu --url https://your-runtim
 - Aily Knowledge Space receives the asset and eventually reports
   \`successful\`.
 - Feishu Base shows the same asset status row when Base env vars are set.
+- Refresh-status probes can observe Aily's latest asset status without
+  re-uploading unchanged content.
 
 ## Runtime Contract
 
@@ -6061,7 +6404,7 @@ export function buildManagedEnvCheck(opts: {
   const env = opts.env ?? process.env;
   const target = opts.target ?? 'sync';
   const needsSync = target === 'canary' || target === 'sync';
-  const needsRealSync = target === 'sync';
+  const needsAilyToken = target === 'canary' || target === 'sync';
   const checks: ManagedEnvCheckItem[] = [
     managedEnvSingleCheck({
       id: 'serverless_pg',
@@ -6092,11 +6435,8 @@ export function buildManagedEnvCheck(opts: {
         id: 'aily_token',
         keys: [AILY_DEFAULT_TOKEN_ENV, AILY_FALLBACK_TOKEN_ENV],
         env,
-        required: needsRealSync,
-        purpose: 'Aily Knowledge Space API token for non-dry-run sync.',
-        message: needsRealSync
-          ? undefined
-          : 'Not required for the default dry-run canary, but required before --no-dry-run or scheduled sync.',
+        required: needsAilyToken,
+        purpose: 'Aily Knowledge Space API token for sync and refresh-status checks.',
       }),
     );
   }
@@ -6113,7 +6453,7 @@ export function buildManagedEnvCheck(opts: {
   if (target === 'status') {
     nextSteps.push('Run managed canary with --status-only after deploying the trigger.');
   } else if (target === 'canary') {
-    nextSteps.push('Run managed canary without --no-dry-run, then inspect status and dry-run sync output.');
+    nextSteps.push('Run managed canary, then inspect status, dry-run sync, and refresh-status output.');
   } else {
     nextSteps.push('Run managed canary in dry-run mode before enabling --no-dry-run or scheduled sync.');
   }
@@ -6150,7 +6490,8 @@ function printManagedEnvCheckResult(payload: ManagedEnvCheckResult, json: boolea
 function parseManagedProbeAction(input: string | undefined): ManagedTriggerAction {
   if (input === undefined || input === 'status') return 'status';
   if (input === 'sync') return 'sync';
-  throw new Error(`--action must be one of status, sync`);
+  if (input === 'refresh-status') return 'refresh-status';
+  throw new Error(`--action must be one of status, sync, refresh-status`);
 }
 
 function parseManagedHttpUrl(raw: string | undefined, command: string, required = false): string | undefined {
@@ -6208,6 +6549,8 @@ export function buildManagedTriggerProbeRequest(opts: ManagedTriggerProbeOpts = 
   if (opts.root) request.root = opts.root;
   if (action === 'sync') {
     request.trigger = opts.trigger ?? 'probe';
+  }
+  if (action === 'sync' || action === 'refresh-status') {
     request.aily = {
       dryRun: opts.dryRun ?? true,
     };
@@ -6333,8 +6676,36 @@ export async function runManagedTriggerCanary(opts: {
   });
   steps.push(managedCanaryStep('sync', syncProbe));
 
+  if (syncProbe.status !== 'ok') {
+    steps.push({
+      name: 'refresh-status',
+      status: 'skipped',
+      reason: 'sync probe failed',
+    });
+    return {
+      status: 'error',
+      url: redactDeep(opts.url),
+      dry_run: opts.dryRun ?? true,
+      steps,
+    };
+  }
+
+  const refreshRequest = buildManagedTriggerProbeRequest({
+    action: 'refresh-status',
+    root: opts.root,
+    sourceId: opts.sourceId,
+    ensureSchema: opts.ensureSchema,
+    dryRun: opts.dryRun,
+  });
+  const refreshProbe = await sendManagedTriggerProbe({
+    url: opts.url,
+    request: refreshRequest,
+    fetchImpl: opts.fetchImpl,
+  });
+  steps.push(managedCanaryStep('refresh-status', refreshProbe));
+
   return {
-    status: syncProbe.status === 'ok' ? 'ok' : 'error',
+    status: refreshProbe.status === 'ok' ? 'ok' : 'error',
     url: redactDeep(opts.url),
     dry_run: opts.dryRun ?? true,
     steps,
@@ -6348,7 +6719,7 @@ function printManagedTriggerCanaryResult(payload: ManagedTriggerCanaryResult, js
   }
   console.log(`Feishu managed canary: ${payload.status}`);
   console.log(`  url: ${payload.url}`);
-  console.log(`  dry-run sync: ${payload.dry_run ? 'yes' : 'no'}`);
+  console.log(`  dry-run actions: ${payload.dry_run ? 'yes' : 'no'}`);
   for (const step of payload.steps) {
     const detail = step.response ? `HTTP ${step.response.status}` : step.reason ?? '';
     console.log(`  - ${step.name}: ${step.status}${detail ? ` (${detail})` : ''}`);
@@ -6461,8 +6832,39 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     else printManagedRegistryStatusResult(payload);
     return;
   }
+  if (sub === 'refresh-status') {
+    const rawArgs = args.slice(1);
+    const initialOpts = parseManagedRefreshStatus(rawArgs, loadAilyEnv(rawArgs), {
+      requireKnowledgeSpaceId: false,
+      requireRegistryUrl: false,
+    });
+    const root = await resolveManagedRegistryRoot(engine, initialOpts, 'refresh-status');
+    const env = loadAilyEnv(rawArgs, root);
+    const opts = parseManagedRefreshStatus(rawArgs, env);
+    const storeConfig = resolveManagedRegistryStoreConfig({
+      kind: opts.registryStore,
+      root,
+      registryPath: opts.registryPath,
+      registryUrl: opts.registryUrl,
+      ensureSchema: opts.registryEnsureSchema,
+    });
+    const job = await runManagedRefreshStatusJob({
+      root,
+      opts,
+      env,
+      storeConfig,
+    });
+    if (opts.json) {
+      console.log(JSON.stringify(job.payload, null, 2));
+    } else {
+      printManagedRefreshStatusResult(job.payload);
+      if (job.payload.checked > 0) console.log(`  token source: ${job.tokenSource}`);
+    }
+    if (job.payload.status === 'partial' || job.payload.base_mirror.failed > 0) process.exitCode = 1;
+    return;
+  }
   if (sub !== 'sync') {
-    throw new Error(`Usage: ${brand()} feishu managed <sync|status|base-template|trigger-template|deploy-bundle|env-check|probe|canary|provision-base|sql-schema> [options]`);
+    throw new Error(`Usage: ${brand()} feishu managed <sync|refresh-status|status|base-template|trigger-template|deploy-bundle|env-check|probe|canary|provision-base|sql-schema> [options]`);
   }
 
   const rawArgs = args.slice(1);
@@ -6905,6 +7307,11 @@ COMMANDS
                  [--registry-ensure-schema] [--json]
       Inspect managed registry counts, latest sync run, Aily statuses, and Base preview rows.
 
+  managed refresh-status [--path DIR] [--registry-store json|postgres] [--registry-url POSTGRES_URL]
+                         [--space-id knowledge_space_xxx] [--dry-run]
+                         [--base-token TOKEN --base-table-id TABLE] [--json]
+      Re-read Aily knowledge asset statuses and update registry/Base status rows.
+
   managed base-template [--json]
       Print the Feishu Base field template used by managed sync status mirroring.
 
@@ -6917,11 +7324,12 @@ COMMANDS
   managed env-check [--target status|canary|sync] [--env-file FILE] [--json]
       Check managed runtime env names without printing secret values.
 
-  managed probe [--action status|sync] [--root DIR] [--url URL] [--json]
-      Print or POST a managed trigger status/sync probe. Sync probes default to dry-run.
+  managed probe [--action status|sync|refresh-status] [--root DIR] [--url URL] [--json]
+      Print or POST a managed trigger status/sync/refresh-status probe.
+      Sync and refresh-status probes default to dry-run.
 
   managed canary --url URL [--root DIR] [--status-only] [--json]
-      POST status then dry-run sync probes to a deployed managed trigger.
+      POST status, dry-run sync, then refresh-status probes to a deployed trigger.
 
   managed sql-schema [--json]
       Print the Postgres DDL for the managed sources/assets/sync_runs registry.
@@ -6963,12 +7371,15 @@ EXAMPLES
   ${brand()} feishu managed env-check --target canary --env-file ./feishu-managed-deploy/.env.example --json
   ${brand()} feishu managed probe --action status --json
   ${brand()} feishu managed probe --action sync --root ~/rbrain-feishu --url https://example.com/trigger --json
+  ${brand()} feishu managed probe --action refresh-status --url https://example.com/trigger --json
   ${brand()} feishu managed canary --root ~/rbrain-feishu --url https://example.com/trigger --json
   ${brand()} feishu managed sql-schema > feishu-managed-registry.sql
   ${brand()} feishu managed provision-base --base-token appxxx --table-name "RBrain Managed Assets" --dry-run --json
   ${brand()} feishu managed sync --path ~/rbrain-feishu --space-id knowledge_space_xxx --dry-run --json
+  ${brand()} feishu managed refresh-status --path ~/rbrain-feishu --space-id knowledge_space_xxx --json
   ${brand()} feishu managed status --path ~/rbrain-feishu --json
   ${brand()} feishu managed sync --path ~/rbrain-feishu --registry-store postgres --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --registry-ensure-schema --space-id knowledge_space_xxx
+  ${brand()} feishu managed refresh-status --registry-store postgres --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --space-id knowledge_space_xxx --json
   ${brand()} feishu managed status --registry-store postgres --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --json
   ${AILY_DEFAULT_TOKEN_ENV}=... ${brand()} feishu aily push-space --space-id knowledge_space_xxx
   ${brand()} feishu doctor

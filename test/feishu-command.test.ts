@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withEnv } from './helpers/with-env.ts';
-import { defaultManagedRegistryPath, recordManagedSyncResult, saveManagedRegistry, createEmptyManagedRegistry } from '../src/core/feishu-managed-registry.ts';
+import { defaultManagedRegistryPath, recordManagedSyncResult, saveManagedRegistry, createEmptyManagedRegistry, loadManagedRegistry } from '../src/core/feishu-managed-registry.ts';
 import {
   FEISHU_DOCTOR_CAPABILITY_CHECKS,
   FEISHU_MIRROR_DIRS,
@@ -72,6 +72,7 @@ import {
   parseDocManifest,
   pushAilyKnowledgeSpace,
   resolveManagedRegistryStoreConfig,
+  runManagedRefreshStatusJob,
   runManagedSyncJob,
   runManagedTrigger,
   runManagedTriggerCanary,
@@ -336,11 +337,12 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('--registry-url POSTGRES_URL');
     expect(stdout).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
     expect(stdout).toContain('managed status [--path DIR]');
+    expect(stdout).toContain('managed refresh-status [--path DIR]');
     expect(stdout).toContain('managed base-template [--json]');
     expect(stdout).toContain('managed trigger-template [--json]');
     expect(stdout).toContain('managed deploy-bundle [--out DIR]');
     expect(stdout).toContain('managed env-check [--target status|canary|sync]');
-    expect(stdout).toContain('managed probe [--action status|sync]');
+    expect(stdout).toContain('managed probe [--action status|sync|refresh-status]');
     expect(stdout).toContain('managed canary --url URL');
     expect(stdout).toContain('managed sql-schema [--json]');
     expect(stdout).toContain('managed provision-base --base-token TOKEN');
@@ -614,6 +616,66 @@ describe('rbrain feishu command helpers', () => {
     expect(existsSync(defaultManagedRegistryPath(root))).toBe(false);
   });
 
+  test('managed trigger can refresh Aily status for a server function', async () => {
+    const root = makeTempDir('rbrain-feishu-managed-trigger-refresh-status-');
+    const seed = recordManagedSyncResult(createEmptyManagedRegistry('2026-06-07T10:00:00.000Z'), {
+      source: { id: 'feishu', kind: 'manual', name: 'Feishu' },
+      trigger: 'api',
+      started_at: '2026-06-07T10:00:00.000Z',
+      finished_at: '2026-06-07T10:00:01.000Z',
+      assets: [{
+        source_uri: 'feishu/docs/roadmap.md',
+        title: 'feishu/docs/roadmap.md',
+        content_sha256: 'f'.repeat(64),
+        normalized_text_uri: 'feishu/docs/roadmap.md',
+        aily_asset_title: 'rbrain-feishu-roadmap.txt',
+        aily_asset_id: 'knowledge_asset_1',
+        aily_status: 'learning',
+        action: 'created',
+      }],
+    });
+    saveManagedRegistry(defaultManagedRegistryPath(root), seed.snapshot);
+
+    const result = await runManagedTrigger({
+      request: {
+        action: 'refresh-status',
+        root,
+        aily: {
+          knowledgeSpaceId: 'knowledge_space_test',
+        },
+      },
+      env: {
+        RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN: 'aily-secret-token',
+      },
+      fetchImpl: async () => new Response(JSON.stringify({
+        status_code: '0',
+        data: {
+          knowledge_assets: [{
+            name: 'rbrain-feishu-roadmap.txt',
+            knowledge_asset_id: 'knowledge_asset_1',
+            status: 'successful',
+          }],
+          has_more: false,
+        },
+      })),
+    });
+
+    const refreshPayload = result.result as {
+      checked: number;
+      updated: number;
+      assets: Array<{ previous_status: string | null; current_status: string | null }>;
+    };
+    expect(result.action).toBe('refresh-status');
+    expect(result.status).toBe('ok');
+    expect(refreshPayload.checked).toBe(1);
+    expect(refreshPayload.updated).toBe(1);
+    expect(refreshPayload.assets[0]).toMatchObject({
+      previous_status: 'learning',
+      current_status: 'successful',
+    });
+    expect(loadManagedRegistry(defaultManagedRegistryPath(root)).assets[0]!.aily_status).toBe('successful');
+  });
+
   test('managed trigger can read mirror root and Base config from runtime env', async () => {
     const root = makeTempDir('rbrain-feishu-managed-trigger-env-');
     const dir = join(root, 'feishu', 'docs');
@@ -728,6 +790,8 @@ describe('rbrain feishu command helpers', () => {
     expect(template).toContain('from "gbrain/feishu-managed"');
     expect(template).toContain('export default async function handler');
     expect(template).toContain('export async function scheduled');
+    expect(template).toContain('export async function refreshStatus');
+    expect(template).toContain("action: 'refresh-status'");
     expect(template).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
     expect(template).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_ID');
     expect(template).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN');
@@ -886,7 +950,7 @@ describe('rbrain feishu command helpers', () => {
     expect(JSON.stringify(result)).not.toContain('/tmp/rbrain-feishu');
   });
 
-  test('managed env check distinguishes canary from real sync token requirements', () => {
+  test('managed env check requires Aily token for canary refresh-status coverage', () => {
     const canary = buildManagedEnvCheck({
       target: 'canary',
       env: {
@@ -904,10 +968,10 @@ describe('rbrain feishu command helpers', () => {
       },
     });
 
-    expect(canary.status).toBe('warn');
+    expect(canary.status).toBe('fail');
     expect(canary.checks.find((check) => check.id === 'aily_token')).toMatchObject({
-      status: 'warn',
-      required: false,
+      status: 'missing',
+      required: true,
     });
     expect(sync.status).toBe('fail');
     expect(sync.checks.find((check) => check.id === 'aily_token')).toMatchObject({
@@ -941,6 +1005,7 @@ describe('rbrain feishu command helpers', () => {
       'RBRAIN_FEISHU_MANAGED_DATABASE_URL=postgresql://user:secret-password@example.com:5432/rbrain',
       'RBRAIN_FEISHU_MIRROR_ROOT=/tmp/rbrain-feishu',
       'RBRAIN_AILY_KNOWLEDGE_SPACE_ID=knowledge_space_test',
+      'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=secret-token',
       '',
     ].join('\n'), 'utf-8');
 
@@ -972,10 +1037,11 @@ describe('rbrain feishu command helpers', () => {
       checks: Array<{ id: string; status: string; present: string[] }>;
     };
 
-    expect(payload.status).toBe('warn');
+    expect(payload.status).toBe('ok');
     expect(payload.target).toBe('canary');
     expect(payload.checks.find((check) => check.id === 'serverless_pg')?.status).toBe('ok');
     expect(proc.stdout.toString()).not.toContain('secret-password');
+    expect(proc.stdout.toString()).not.toContain('secret-token');
     expect(proc.stdout.toString()).not.toContain('/tmp/rbrain-feishu');
   });
 
@@ -1009,6 +1075,22 @@ describe('rbrain feishu command helpers', () => {
     });
     expect(JSON.stringify(syncProbe)).not.toContain('secret-token');
     expect(JSON.stringify(syncProbe)).not.toContain('postgresql://');
+
+    const refreshProbe = buildManagedTriggerProbeRequest({
+      action: 'refresh-status',
+      sourceId: 'feishu',
+    });
+    expect(refreshProbe).toEqual({
+      action: 'refresh-status',
+      sourceId: 'feishu',
+      registry: {
+        store: 'postgres',
+        ensureSchema: true,
+      },
+      aily: {
+        dryRun: true,
+      },
+    });
   });
 
   test('managed probe can POST a request with JSON headers', async () => {
@@ -1051,7 +1133,7 @@ describe('rbrain feishu command helpers', () => {
     expect(result.response.body).not.toContain(pgUrl);
   });
 
-  test('managed canary runs status before dry-run sync', async () => {
+  test('managed canary runs status, dry-run sync, then refresh-status', async () => {
     const calls: Array<{ action?: string; body: Record<string, unknown> }> = [];
     const result = await runManagedTriggerCanary({
       url: 'https://runtime.example/trigger',
@@ -1068,9 +1150,10 @@ describe('rbrain feishu command helpers', () => {
 
     expect(result.status).toBe('ok');
     expect(result.dry_run).toBe(true);
-    expect(calls.map((call) => call.action)).toEqual(['status', 'sync']);
+    expect(calls.map((call) => call.action)).toEqual(['status', 'sync', 'refresh-status']);
     expect((calls[1]!.body.aily as Record<string, unknown>).dryRun).toBe(true);
-    expect(result.steps.map((step) => step.status)).toEqual(['ok', 'ok']);
+    expect((calls[2]!.body.aily as Record<string, unknown>).dryRun).toBe(true);
+    expect(result.steps.map((step) => step.status)).toEqual(['ok', 'ok', 'ok']);
   });
 
   test('managed canary skips sync when status fails', async () => {
@@ -1096,6 +1179,31 @@ describe('rbrain feishu command helpers', () => {
       name: 'sync',
       status: 'skipped',
       reason: 'status probe failed',
+    });
+  });
+
+  test('managed canary skips refresh-status when sync fails', async () => {
+    const calls: string[] = [];
+    const result = await runManagedTriggerCanary({
+      url: 'https://runtime.example/trigger',
+      root: '/tmp/rbrain-feishu',
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        calls.push(String(body.action));
+        return new Response(JSON.stringify({ status: body.action === 'sync' ? 'error' : 'ok' }), {
+          status: body.action === 'sync' ? 503 : 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+
+    expect(result.status).toBe('error');
+    expect(calls).toEqual(['status', 'sync']);
+    expect(result.steps).toHaveLength(3);
+    expect(result.steps[2]).toMatchObject({
+      name: 'refresh-status',
+      status: 'skipped',
+      reason: 'sync probe failed',
     });
   });
 
@@ -1241,6 +1349,88 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.latest_sync_run.assets_seen).toBe(1);
     expect(payload.aily_statuses).toEqual({ successful: 1 });
     expect(payload.base_mirror.preview).toHaveLength(1);
+  });
+
+  test('managed refresh-status job re-reads Aily statuses without leaking the token', async () => {
+    const root = makeTempDir('rbrain-feishu-managed-refresh-status-');
+    const candidates = collectAilyPushCandidates(root);
+    const seed = recordManagedSyncResult(createEmptyManagedRegistry('2026-06-07T10:00:00.000Z'), {
+      source: { id: 'feishu', kind: 'manual', name: 'Feishu' },
+      trigger: 'manual',
+      started_at: '2026-06-07T10:00:00.000Z',
+      finished_at: '2026-06-07T10:00:01.000Z',
+      assets: candidates.map((candidate, idx) => ({
+        source_uri: candidate.source_url,
+        title: candidate.relative_path,
+        content_sha256: candidate.content_sha256,
+        normalized_text_uri: candidate.relative_path,
+        aily_asset_title: candidate.title,
+        aily_asset_id: `knowledge_asset_${idx}`,
+        aily_status: 'learning',
+        action: 'created',
+      })),
+    });
+    saveManagedRegistry(defaultManagedRegistryPath(root), seed.snapshot);
+
+    let mirroredStatus = '';
+    const job = await runManagedRefreshStatusJob({
+      root,
+      env: { RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN: 'aily-secret-token' },
+      opts: {
+        path: root,
+        sourceId: 'feishu',
+        host: 'https://apaas.feishu.cn',
+        knowledgeSpaceId: 'knowledge_space_test',
+        tokenEnv: 'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN',
+        dryRun: false,
+        json: true,
+        registryStore: 'json',
+        registryEnsureSchema: false,
+        baseToken: 'base-secret-token',
+        baseTableId: 'tbl_test',
+      },
+      fetchImpl: async (_url, init) => {
+        if (!init) throw new Error('expected Aily list request init');
+        expect(init.headers).toMatchObject({ 'x-api-token': 'aily-secret-token' });
+        return new Response(JSON.stringify({
+          status_code: '0',
+          data: {
+            knowledge_assets: [
+              { name: candidates[0]!.title, knowledge_asset_id: 'knowledge_asset_0', status: 'successful' },
+            ],
+            has_more: false,
+            total: 1,
+          },
+        }));
+      },
+      mirrorBaseRows: ({ rows }) => {
+        mirroredStatus = rows[0]?.aily_status ?? '';
+        return {
+          status: 'ok',
+          configured: true,
+          dry_run: false,
+          created: 0,
+          updated: rows.length,
+          failed: 0,
+          errors: [],
+        };
+      },
+    });
+
+    expect(job.payload.status).toBe('ok');
+    expect(job.payload.persisted).toBe(true);
+    expect(job.payload.checked).toBe(1);
+    expect(job.payload.updated).toBe(1);
+    expect(job.payload.assets[0]!.previous_status).toBe('learning');
+    expect(job.payload.assets[0]!.current_status).toBe('successful');
+    expect(job.payload.base_mirror.configured).toBe(true);
+    expect(mirroredStatus).toBe('successful');
+    expect(JSON.stringify(job.payload)).not.toContain('aily-secret-token');
+    expect(JSON.stringify(job.payload)).not.toContain('base-secret-token');
+
+    const saved = loadManagedRegistry(defaultManagedRegistryPath(root));
+    expect(saved.assets[0]!.aily_status).toBe('successful');
+    expect(saved.assets[0]!.last_synced_at).toBe('2026-06-07T10:00:01.000Z');
   });
 
   test('managed base-template prints the status table field contract', () => {

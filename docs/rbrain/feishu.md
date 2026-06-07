@@ -180,6 +180,25 @@ rbrain feishu managed status \
 The status command does not require an Aily token. It reports source/asset/run
 counts, the latest sync run, Aily status counts, and a Base mirror preview.
 
+Because Aily learns uploaded knowledge assets asynchronously, `managed sync`
+only records the status returned during upload. After the Feishu-side learning
+job has had time to finish, refresh the registry from Aily:
+
+```bash
+RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=... \
+  rbrain feishu managed refresh-status \
+  --path ~/rbrain-feishu \
+  --space-id knowledge_space_xxx \
+  --json
+```
+
+`managed refresh-status` lists the current Aily knowledge assets, matches them
+by asset id first and deterministic title second, updates `aily_status` in the
+registry, and marks missing remote assets as `missing`. It does not change
+`last_synced_at`, which remains the content upload timestamp. Add
+`--base-token` and `--base-table-id` to mirror the refreshed status rows into
+Feishu Base.
+
 For an online trigger, first emit the deployable TypeScript wrapper:
 
 ```bash
@@ -195,8 +214,8 @@ rbrain feishu managed deploy-bundle --out ./feishu-managed-deploy
 
 The bundle writes:
 
-- `feishu-managed-trigger.ts` for HTTP/manual, scheduled sync, and status
-  entrypoints
+- `feishu-managed-trigger.ts` for HTTP/manual, scheduled sync, status, and
+  refresh-status entrypoints
 - `feishu-managed-registry.sql` for the managed Postgres tables
 - `.env.example` with required environment variable names
 - `README.md` with deployment and smoke-test steps
@@ -212,8 +231,8 @@ rbrain feishu managed env-check --target sync --json
 ```
 
 `--target status` requires only the Serverless PG URL. `--target canary`
-requires PG, mirror root, and Aily Knowledge Space ID; the Aily token is a
-warning because the default canary sync is dry-run. `--target sync` treats the
+requires PG, mirror root, Aily Knowledge Space ID, and the Aily token because
+the canary includes a refresh-status probe. `--target sync` treats the same
 Aily token as required before real scheduled sync or `--no-dry-run`.
 
 Before or after deployment, generate the exact probe bodies:
@@ -221,29 +240,35 @@ Before or after deployment, generate the exact probe bodies:
 ```bash
 rbrain feishu managed probe --action status --json
 rbrain feishu managed probe --action sync --root ~/rbrain-feishu --json
+rbrain feishu managed probe --action refresh-status --json
 ```
 
 To exercise a deployed HTTP trigger, pass its URL. Sync probes default to
-`dryRun: true`; use `--no-dry-run` only after the status probe is healthy:
+`dryRun: true`; refresh-status probes also default to dry-run so they can read
+Aily's latest state without writing the registry/Base rows. Use `--no-dry-run`
+only after the status probe is healthy:
 
 ```bash
 rbrain feishu managed probe --action status --url https://example.com/trigger --json
 rbrain feishu managed probe --action sync --root ~/rbrain-feishu --url https://example.com/trigger --json
+rbrain feishu managed probe --action refresh-status --url https://example.com/trigger --json
 ```
 
-For a one-command deployment canary, run status first and then dry-run sync:
+For a one-command deployment canary, run status first, then dry-run sync, then
+refresh-status:
 
 ```bash
 rbrain feishu managed canary --root ~/rbrain-feishu --url https://example.com/trigger --json
 ```
 
-If the status step fails, sync is skipped. Use `--status-only` when validating
-only Serverless PG and trigger reachability before wiring the mirror root.
+If the status step fails, sync is skipped. If sync fails, refresh-status is
+skipped. Use `--status-only` when validating only Serverless PG and trigger
+reachability before wiring the mirror root.
 
 The generated template imports `handleManagedTriggerRequest` from
-`gbrain/feishu-managed`, exposes HTTP `handler`, `scheduled`, and `status`
-functions, and only names environment variables. It does not embed tokens or
-database URLs. Configure these variables in the target platform:
+`gbrain/feishu-managed`, exposes HTTP `handler`, `scheduled`, `status`, and
+`refreshStatus` functions, and only names environment variables. It does not
+embed tokens or database URLs. Configure these variables in the target platform:
 
 ```text
 RBRAIN_FEISHU_MIRROR_ROOT
@@ -255,8 +280,8 @@ RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID
 ```
 
 The underlying reusable API is `runManagedTrigger`. It accepts an action of
-`status` or `sync`, reads the same JSON/Postgres store configuration, and calls
-the same job functions used by the CLI:
+`status`, `sync`, or `refresh-status`, reads the same JSON/Postgres store
+configuration, and calls the same job functions used by the CLI:
 
 ```ts
 import { runManagedTrigger } from 'gbrain/feishu-managed';
@@ -330,6 +355,10 @@ rbrain feishu managed sync --path ~/rbrain-feishu \
 The command searches the table by `Source URI`. If a matching record exists, it
 updates that record; otherwise it creates one. The Base token is never printed
 in JSON output.
+
+The same Base mirror flags are supported by `managed refresh-status`, so the
+Base table can reflect Aily's latest learning state without re-uploading
+unchanged Markdown snapshots.
 
 For Serverless PG / Miaoda storage, emit the managed registry DDL:
 
