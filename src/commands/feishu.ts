@@ -6018,6 +6018,14 @@ interface ManagedDeployBundleCliOpts extends ManagedTriggerTemplateOpts {
   json: boolean;
 }
 
+interface ManagedDeployPlanCliOpts {
+  url?: string;
+  targetStatus: string;
+  timeoutMs: number;
+  intervalMs: number;
+  json: boolean;
+}
+
 interface ManagedDeployBundleFileSpec {
   path: string;
   content: string;
@@ -6070,6 +6078,24 @@ export interface ManagedEnvCheckResult {
   target: ManagedEnvCheckTarget;
   checks: ManagedEnvCheckItem[];
   next_steps: string[];
+}
+
+export interface ManagedDeployPlanStep {
+  id: string;
+  title: string;
+  status: 'ready' | 'blocked' | 'manual';
+  command?: string;
+  reason?: string;
+  depends_on?: string[];
+}
+
+export interface ManagedDeployPlanResult {
+  status: 'ready' | 'blocked';
+  env_check: ManagedEnvCheckResult;
+  trigger_url: string | null;
+  missing_required_env_keys: string[];
+  steps: ManagedDeployPlanStep[];
+  notes: string[];
 }
 
 export interface ManagedTriggerProbeSendResult {
@@ -6474,6 +6500,7 @@ rbrain feishu managed provision-registry --registry-url "$RBRAIN_FEISHU_MANAGED_
 \`\`\`bash
 rbrain feishu managed env-check --target canary --env-file .env.example --json
 rbrain feishu managed env-check --target sync --json
+rbrain feishu managed deploy-plan --url https://your-runtime.example/trigger --json
 \`\`\`
 
 5. Deploy \`feishu-managed-trigger.ts\` as the HTTP/manual and scheduled
@@ -6589,6 +6616,18 @@ function parseManagedEnvCheckTarget(input: string | undefined): ManagedEnvCheckT
 function parseManagedEnvCheck(args: string[]): ManagedEnvCheckCliOpts {
   return {
     target: parseManagedEnvCheckTarget(parseFlagValue(args, '--target')),
+    json: args.includes('--json'),
+  };
+}
+
+function parseManagedDeployPlan(args: string[]): ManagedDeployPlanCliOpts {
+  const targetStatus = parseFlagValue(args, '--target-status') ?? 'successful';
+  if (!targetStatus.trim()) throw new Error('--target-status cannot be empty');
+  return {
+    url: parseManagedHttpUrl(parseFlagValue(args, '--url'), 'deploy-plan'),
+    targetStatus,
+    timeoutMs: parsePositiveIntFlag(args, '--timeout-ms') ?? 300_000,
+    intervalMs: parsePositiveIntFlag(args, '--interval-ms') ?? 15_000,
     json: args.includes('--json'),
   };
 }
@@ -6722,6 +6761,146 @@ export function buildManagedEnvCheck(opts: {
     checks,
     next_steps: nextSteps,
   };
+}
+
+function shellArg(value: string): string {
+  return JSON.stringify(value);
+}
+
+function managedDeployStep(opts: {
+  id: string;
+  title: string;
+  status?: ManagedDeployPlanStep['status'];
+  command?: string;
+  reason?: string;
+  depends_on?: string[];
+}): ManagedDeployPlanStep {
+  return {
+    id: opts.id,
+    title: opts.title,
+    status: opts.status ?? 'ready',
+    ...(opts.command ? { command: opts.command } : {}),
+    ...(opts.reason ? { reason: opts.reason } : {}),
+    ...(opts.depends_on ? { depends_on: opts.depends_on } : {}),
+  };
+}
+
+export function buildManagedDeployPlan(opts: {
+  env?: EnvLookup;
+  url?: string;
+  targetStatus?: string;
+  timeoutMs?: number;
+  intervalMs?: number;
+} = {}): ManagedDeployPlanResult {
+  const envCheck = buildManagedEnvCheck({ env: opts.env, target: 'canary' });
+  const missingRequiredEnvKeys = envCheck.checks
+    .filter((check) => check.required && check.status === 'missing')
+    .flatMap((check) => check.keys);
+  const hasMissingEnv = missingRequiredEnvKeys.length > 0;
+  const triggerUrl = opts.url ? String(redactDeep(opts.url)) : null;
+  const triggerUrlArg = triggerUrl ? shellArg(triggerUrl) : shellArg('https://your-runtime.example/trigger');
+  const targetStatus = opts.targetStatus ?? 'successful';
+  const timeoutMs = opts.timeoutMs ?? 300_000;
+  const intervalMs = opts.intervalMs ?? 15_000;
+  const waitArgs = `--target-status ${shellArg(targetStatus)} --timeout-ms ${timeoutMs} --interval-ms ${intervalMs}`;
+  const missingUrlReason = opts.url ? undefined : 'Set --url after deploying the managed trigger HTTP endpoint.';
+  const missingEnvReason = hasMissingEnv
+    ? `Set required runtime variables first: ${missingRequiredEnvKeys.join(', ')}.`
+    : undefined;
+  const canRunRemote = !hasMissingEnv && Boolean(opts.url);
+
+  const steps: ManagedDeployPlanStep[] = [
+    managedDeployStep({
+      id: 'env-check',
+      title: 'Check runtime environment names',
+      status: hasMissingEnv ? 'blocked' : 'ready',
+      command: 'rbrain feishu managed env-check --target canary --json',
+      reason: missingEnvReason,
+    }),
+    managedDeployStep({
+      id: 'provision-registry',
+      title: 'Apply or verify Serverless PG registry schema',
+      status: hasMissingEnv ? 'blocked' : 'ready',
+      command: `rbrain feishu managed provision-registry --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --json`,
+      reason: missingEnvReason,
+      depends_on: ['env-check'],
+    }),
+    managedDeployStep({
+      id: 'deploy-trigger',
+      title: 'Deploy the generated trigger to Miaoda or a server-function runtime',
+      status: 'manual',
+      command: `rbrain feishu managed deploy-bundle --out ${shellArg(MANAGED_DEPLOY_BUNDLE_DEFAULT_DIR)} --json`,
+      depends_on: ['provision-registry'],
+    }),
+    managedDeployStep({
+      id: 'status-canary',
+      title: 'Probe deployed trigger and Serverless PG connectivity',
+      status: canRunRemote ? 'ready' : 'blocked',
+      command: `rbrain feishu managed canary --url ${triggerUrlArg} --status-only --json`,
+      reason: missingEnvReason ?? missingUrlReason,
+      depends_on: ['deploy-trigger'],
+    }),
+    managedDeployStep({
+      id: 'production-canary',
+      title: 'Run real sync and wait for Aily asset learning',
+      status: canRunRemote ? 'ready' : 'blocked',
+      command: `rbrain feishu managed canary --root "$${MANAGED_MIRROR_ROOT_ENV}" --url ${triggerUrlArg} --no-dry-run --wait-status ${waitArgs} --json`,
+      reason: missingEnvReason ?? missingUrlReason,
+      depends_on: ['status-canary'],
+    }),
+    managedDeployStep({
+      id: 'inspect-registry',
+      title: 'Inspect managed registry and Base mirror preview',
+      status: hasMissingEnv ? 'blocked' : 'ready',
+      command: `rbrain feishu managed status --registry-store postgres --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --json`,
+      reason: missingEnvReason,
+      depends_on: ['production-canary'],
+    }),
+    managedDeployStep({
+      id: 'agent-answer-check',
+      title: 'Ask the Aily custom agent a question covered by the uploaded asset',
+      status: 'manual',
+      reason: 'Confirm the runtime retrieval path, not only ingestion status.',
+      depends_on: ['production-canary'],
+    }),
+  ];
+
+  const notes = [
+    'Commands intentionally reference environment variable names instead of printing secret values.',
+    'Manual steps remain manual because Miaoda deployment and Aily agent chat happen outside the local CLI.',
+  ];
+  if (envCheck.status === 'warn') {
+    notes.push('The optional Feishu Base mirror is incomplete; ingestion can still proceed, but the governance table will not be fully updated.');
+  }
+
+  return {
+    status: steps.some((step) => step.status === 'blocked') ? 'blocked' : 'ready',
+    env_check: envCheck,
+    trigger_url: triggerUrl,
+    missing_required_env_keys: missingRequiredEnvKeys,
+    steps,
+    notes,
+  };
+}
+
+function printManagedDeployPlanResult(payload: ManagedDeployPlanResult, json: boolean): void {
+  if (json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  console.log(`Feishu managed deploy plan: ${payload.status}`);
+  console.log(`  env: ${payload.env_check.status}`);
+  console.log(`  trigger url: ${payload.trigger_url ?? 'not set'}`);
+  console.log(`  steps:`);
+  for (const step of payload.steps) {
+    console.log(`  - ${step.id}: ${step.status} - ${step.title}`);
+    if (step.command) console.log(`    ${step.command}`);
+    if (step.reason) console.log(`    ${step.reason}`);
+  }
+  if (payload.notes.length > 0) {
+    console.log(`  notes:`);
+    for (const note of payload.notes) console.log(`  - ${note}`);
+  }
 }
 
 function printManagedEnvCheckResult(payload: ManagedEnvCheckResult, json: boolean): void {
@@ -7149,6 +7328,20 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     if (payload.status === 'fail') process.exitCode = 1;
     return;
   }
+  if (sub === 'deploy-plan') {
+    const rawArgs = args.slice(1);
+    const opts = parseManagedDeployPlan(rawArgs);
+    const payload = buildManagedDeployPlan({
+      env: loadAilyEnv(rawArgs),
+      url: opts.url,
+      targetStatus: opts.targetStatus,
+      timeoutMs: opts.timeoutMs,
+      intervalMs: opts.intervalMs,
+    });
+    printManagedDeployPlanResult(payload, opts.json);
+    if (payload.status === 'blocked') process.exitCode = 1;
+    return;
+  }
   if (sub === 'canary') {
     const opts = parseManagedCanary(args.slice(1));
     const payload = await runManagedTriggerCanary(opts);
@@ -7281,7 +7474,7 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     return;
   }
   if (sub !== 'sync') {
-    throw new Error(`Usage: ${brand()} feishu managed <sync|refresh-status|wait-status|status|base-template|trigger-template|deploy-bundle|env-check|probe|canary|provision-registry|provision-base|sql-schema> [options]`);
+    throw new Error(`Usage: ${brand()} feishu managed <sync|refresh-status|wait-status|status|base-template|trigger-template|deploy-bundle|deploy-plan|env-check|probe|canary|provision-registry|provision-base|sql-schema> [options]`);
   }
 
   const rawArgs = args.slice(1);
@@ -7743,6 +7936,9 @@ COMMANDS
   managed deploy-bundle [--out DIR] [--import SPECIFIER] [--force] [--json]
       Write trigger, Postgres DDL, env example, and README files for deployment.
 
+  managed deploy-plan [--url URL] [--env-file FILE] [--target-status successful] [--json]
+      Print an ordered, secret-safe deployment and verification plan.
+
   managed env-check [--target status|canary|sync] [--env-file FILE] [--json]
       Check managed runtime env names without printing secret values.
 
@@ -7793,6 +7989,7 @@ EXAMPLES
   ${brand()} feishu managed base-template --json
   ${brand()} feishu managed trigger-template > feishu-managed-trigger.ts
   ${brand()} feishu managed deploy-bundle --out ./feishu-managed-deploy --json
+  ${brand()} feishu managed deploy-plan --url https://example.com/trigger --json
   ${brand()} feishu managed env-check --target canary --env-file ./feishu-managed-deploy/.env.example --json
   ${brand()} feishu managed probe --action status --json
   ${brand()} feishu managed probe --action sync --root ~/rbrain-feishu --url https://example.com/trigger --json

@@ -47,6 +47,7 @@ import {
   buildMailTriageScript,
   buildManagedEnvCheck,
   buildManagedDeployBundleFiles,
+  buildManagedDeployPlan,
   buildManagedTriggerProbeRequest,
   buildMirrorReadme,
   buildMirrorGitignore,
@@ -344,6 +345,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('managed base-template [--json]');
     expect(stdout).toContain('managed trigger-template [--json]');
     expect(stdout).toContain('managed deploy-bundle [--out DIR]');
+    expect(stdout).toContain('managed deploy-plan [--url URL]');
     expect(stdout).toContain('managed env-check [--target status|canary|sync]');
     expect(stdout).toContain('managed probe [--action status|sync|refresh-status]');
     expect(stdout).toContain('managed canary --url URL');
@@ -858,6 +860,7 @@ describe('rbrain feishu command helpers', () => {
     expect(byPath.get('.env.example')).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL=');
     expect(byPath.get('.env.example')).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=');
     expect(byPath.get('README.md')).toContain('status probe');
+    expect(byPath.get('README.md')).toContain('managed deploy-plan');
     expect(byPath.get('README.md')).toContain('managed canary');
     expect(JSON.stringify(files)).not.toContain('secret-token');
     expect(JSON.stringify(files)).not.toContain('postgresql://user:secret-password');
@@ -935,6 +938,106 @@ describe('rbrain feishu command helpers', () => {
     expect(proc.exitCode).not.toBe(0);
     expect(proc.stderr.toString()).toContain('refuses to overwrite existing files');
     expect(readFileSync(join(outDir, 'README.md'), 'utf-8')).toBe('existing\n');
+  });
+
+  test('managed deploy plan orders online verification without leaking secrets', () => {
+    const plan = buildManagedDeployPlan({
+      url: 'https://runtime.example/trigger',
+      targetStatus: 'successful',
+      timeoutMs: 1_000,
+      intervalMs: 500,
+      env: {
+        RBRAIN_FEISHU_MANAGED_DATABASE_URL: 'postgresql://user:secret-password@example.com:5432/rbrain',
+        RBRAIN_FEISHU_MIRROR_ROOT: '/tmp/rbrain-feishu',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_ID: 'knowledge_space_test',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN: 'secret-token',
+      },
+    });
+
+    expect(plan.status).toBe('ready');
+    expect(plan.env_check.status).toBe('ok');
+    expect(plan.missing_required_env_keys).toEqual([]);
+    expect(plan.steps.map((step) => step.id)).toEqual([
+      'env-check',
+      'provision-registry',
+      'deploy-trigger',
+      'status-canary',
+      'production-canary',
+      'inspect-registry',
+      'agent-answer-check',
+    ]);
+    expect(plan.steps.find((step) => step.id === 'production-canary')?.command).toContain('--wait-status');
+    expect(plan.steps.find((step) => step.id === 'production-canary')?.command).toContain('--timeout-ms 1000');
+    expect(JSON.stringify(plan)).not.toContain('secret-password');
+    expect(JSON.stringify(plan)).not.toContain('secret-token');
+    expect(JSON.stringify(plan)).not.toContain('/tmp/rbrain-feishu');
+  });
+
+  test('managed deploy plan blocks when env or trigger URL is missing', () => {
+    const plan = buildManagedDeployPlan({ env: {} });
+
+    expect(plan.status).toBe('blocked');
+    expect(plan.missing_required_env_keys).toEqual([
+      'RBRAIN_FEISHU_MANAGED_DATABASE_URL',
+      'RBRAIN_FEISHU_MIRROR_ROOT',
+      'RBRAIN_AILY_KNOWLEDGE_SPACE_ID',
+      'AILY_KNOWLEDGE_SPACE_ID',
+      'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN',
+      'AILY_KNOWLEDGE_SPACE_API_TOKEN',
+    ]);
+    expect(plan.steps.find((step) => step.id === 'env-check')).toMatchObject({
+      status: 'blocked',
+    });
+    expect(plan.steps.find((step) => step.id === 'status-canary')).toMatchObject({
+      status: 'blocked',
+    });
+  });
+
+  test('managed deploy-plan CLI reads env-file and returns JSON status', () => {
+    const root = makeTempDir('rbrain-feishu-deploy-plan-');
+    const envFile = join(root, '.env');
+    writeFileSync(envFile, [
+      'RBRAIN_FEISHU_MANAGED_DATABASE_URL=postgresql://user:secret-password@example.com:5432/rbrain',
+      'RBRAIN_FEISHU_MIRROR_ROOT=/tmp/rbrain-feishu',
+      'RBRAIN_AILY_KNOWLEDGE_SPACE_ID=knowledge_space_test',
+      'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=secret-token',
+      '',
+    ].join('\n'), 'utf-8');
+
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'deploy-plan',
+        '--env-file',
+        envFile,
+        '--url',
+        'https://runtime.example/trigger',
+        '--json',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: {
+        PATH: process.env.PATH ?? '',
+      },
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      status: string;
+      trigger_url: string | null;
+      steps: Array<{ id: string; status: string; command?: string }>;
+    };
+
+    expect(payload.status).toBe('ready');
+    expect(payload.trigger_url).toBe('https://runtime.example/trigger');
+    expect(payload.steps.find((step) => step.id === 'production-canary')?.command).toContain('--wait-status');
+    expect(proc.stdout.toString()).not.toContain('secret-password');
+    expect(proc.stdout.toString()).not.toContain('secret-token');
+    expect(proc.stdout.toString()).not.toContain('/tmp/rbrain-feishu');
   });
 
   test('managed env check reports missing required runtime variables without leaking values', () => {
