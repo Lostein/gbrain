@@ -45,6 +45,7 @@ import {
   buildImMessageSearchScript,
   buildMailTriageMarkdown,
   buildMailTriageScript,
+  buildManagedDeployBundleFiles,
   buildMirrorReadme,
   buildMirrorGitignore,
   buildManagedTriggerTemplate,
@@ -333,6 +334,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('managed status [--path DIR]');
     expect(stdout).toContain('managed base-template [--json]');
     expect(stdout).toContain('managed trigger-template [--json]');
+    expect(stdout).toContain('managed deploy-bundle [--out DIR]');
     expect(stdout).toContain('managed sql-schema [--json]');
     expect(stdout).toContain('managed provision-base --base-token TOKEN');
   });
@@ -720,6 +722,101 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.template).toContain('status');
     expect(JSON.stringify(payload)).not.toContain('secret-token');
     expect(JSON.stringify(payload)).not.toContain('postgresql://user:secret-password');
+  });
+
+  test('managed deploy bundle files package trigger, schema, env, and README without real secrets', () => {
+    const files = buildManagedDeployBundleFiles({
+      importSpecifier: 'gbrain/feishu-managed',
+    });
+    const byPath = new Map(files.map((file) => [file.path, file.content]));
+
+    expect(Array.from(byPath.keys()).sort()).toEqual([
+      '.env.example',
+      'README.md',
+      'feishu-managed-registry.sql',
+      'feishu-managed-trigger.ts',
+    ]);
+    expect(byPath.get('feishu-managed-trigger.ts')).toContain('from "gbrain/feishu-managed"');
+    expect(byPath.get('feishu-managed-registry.sql')).toContain('feishu_managed_assets');
+    expect(byPath.get('.env.example')).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL=');
+    expect(byPath.get('.env.example')).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=');
+    expect(byPath.get('README.md')).toContain('status probe');
+    expect(JSON.stringify(files)).not.toContain('secret-token');
+    expect(JSON.stringify(files)).not.toContain('postgresql://user:secret-password');
+  });
+
+  test('managed deploy-bundle writes deployable files and reports them as JSON', () => {
+    const root = makeTempDir('rbrain-feishu-managed-deploy-');
+    const outDir = join(root, 'bundle');
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'deploy-bundle',
+        '--out',
+        outDir,
+        '--json',
+        '--import',
+        'gbrain/feishu-managed',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      status: string;
+      out_dir: string;
+      import_specifier: string;
+      files: Array<{ path: string; bytes: number }>;
+      env: string[];
+    };
+
+    expect(payload.status).toBe('ok');
+    expect(payload.out_dir).toBe(outDir);
+    expect(payload.import_specifier).toBe('gbrain/feishu-managed');
+    expect(payload.files.map((file) => file.path).sort()).toEqual([
+      '.env.example',
+      'README.md',
+      'feishu-managed-registry.sql',
+      'feishu-managed-trigger.ts',
+    ]);
+    expect(payload.env).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
+    expect(existsSync(join(outDir, 'feishu-managed-trigger.ts'))).toBe(true);
+    expect(readFileSync(join(outDir, 'feishu-managed-trigger.ts'), 'utf-8')).toContain('handleManagedTriggerRequest');
+    expect(readFileSync(join(outDir, 'feishu-managed-registry.sql'), 'utf-8')).toContain('feishu_managed_sync_runs');
+    expect(readFileSync(join(outDir, '.env.example'), 'utf-8')).not.toContain('postgresql://');
+    expect(JSON.stringify(payload)).not.toContain('secret-token');
+  });
+
+  test('managed deploy-bundle refuses to overwrite existing files without --force', () => {
+    const root = makeTempDir('rbrain-feishu-managed-deploy-conflict-');
+    const outDir = join(root, 'bundle');
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(join(outDir, 'README.md'), 'existing\n', 'utf-8');
+
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'deploy-bundle',
+        '--out',
+        outDir,
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+
+    expect(proc.exitCode).not.toBe(0);
+    expect(proc.stderr.toString()).toContain('refuses to overwrite existing files');
+    expect(readFileSync(join(outDir, 'README.md'), 'utf-8')).toBe('existing\n');
   });
 
   test('managed registry store config defaults to JSON and redacts Postgres URLs', async () => {
