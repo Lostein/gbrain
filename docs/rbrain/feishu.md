@@ -150,7 +150,8 @@ same rows can be inspected before writing to Feishu Base.
 
 The sync command reads and writes through a registry store boundary. The current
 store is JSON for local fixture and debugging runs; the same table contract is
-intended to back a later Serverless PG / Miaoda store.
+also implemented by `PostgresManagedRegistryStore` for the later Serverless PG /
+Miaoda runtime.
 
 Idempotency is registry-driven: if a candidate's hash matches the existing
 asset row, upload is skipped locally; if the hash changes, the Aily asset is
@@ -192,7 +193,9 @@ rbrain feishu managed sql-schema > feishu-managed-registry.sql
 The schema creates `feishu_managed_sources`, `feishu_managed_assets`, and
 `feishu_managed_sync_runs` with the same fields used by the local JSON registry,
 plus uniqueness constraints for `(source_id, source_uri)` and deterministic Aily
-asset titles.
+asset titles. `PostgresManagedRegistryStore` reads and writes that schema; the
+CLI still defaults to JSON until the online runtime and connection configuration
+are wired.
 
 For the proposed Feishu-native managed architecture, where Aily Knowledge Space
 is the runtime knowledge backend, Miaoda hosts the online control plane, and

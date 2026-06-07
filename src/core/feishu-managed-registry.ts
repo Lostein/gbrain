@@ -96,6 +96,16 @@ export interface ManagedRegistryStore {
   save(snapshot: ManagedRegistrySnapshot): Promise<void>;
 }
 
+export interface ManagedRegistrySqlClient {
+  <T extends Record<string, unknown> = Record<string, unknown>>(
+    strings: TemplateStringsArray,
+    ...values: unknown[]
+  ): Promise<T[]>;
+  begin?<T>(fn: (sql: ManagedRegistrySqlClient) => Promise<T>): Promise<T>;
+  unsafe?(query: string): Promise<unknown>;
+  json?(value: unknown): unknown;
+}
+
 export interface ManagedBaseMirrorRow {
   source_id: string;
   source_uri: string;
@@ -173,6 +183,250 @@ export class JsonManagedRegistryStore implements ManagedRegistryStore {
 
 export function createJsonManagedRegistryStore(path: string): ManagedRegistryStore {
   return new JsonManagedRegistryStore(path);
+}
+
+export class PostgresManagedRegistryStore implements ManagedRegistryStore {
+  readonly kind = 'postgres';
+  readonly location: string;
+  private readonly sql: ManagedRegistrySqlClient;
+
+  constructor(sql: ManagedRegistrySqlClient, location = 'postgres') {
+    this.sql = sql;
+    this.location = location;
+  }
+
+  async ensureSchema(): Promise<void> {
+    if (!this.sql.unsafe) {
+      throw new Error('PostgresManagedRegistryStore.ensureSchema requires a SQL client with unsafe().');
+    }
+    await this.sql.unsafe(buildManagedRegistrySqlSchema());
+  }
+
+  async load(): Promise<ManagedRegistrySnapshot> {
+    const [sources, assets, syncRuns] = await Promise.all([
+      this.sql<Record<string, unknown>>`
+        SELECT id, kind, name, config_json, enabled, created_at, updated_at
+        FROM feishu_managed_sources
+        ORDER BY id
+      `,
+      this.sql<Record<string, unknown>>`
+        SELECT id, source_id, source_uri, title, content_sha256, normalized_text_uri,
+               aily_asset_id, aily_asset_title, aily_status, last_synced_at, created_at, updated_at
+        FROM feishu_managed_assets
+        ORDER BY source_id, source_uri
+      `,
+      this.sql<Record<string, unknown>>`
+        SELECT id, trigger, source_id, status, started_at, finished_at, assets_seen,
+               assets_changed, assets_uploaded, error_summary, log_uri
+        FROM feishu_managed_sync_runs
+        ORDER BY started_at, id
+      `,
+    ]);
+
+    const updatedAt = latestTimestamp([
+      ...sources.map((row) => row.updated_at),
+      ...assets.map((row) => row.updated_at),
+      ...syncRuns.map((row) => row.finished_at),
+    ]);
+    return {
+      schema_version: FEISHU_MANAGED_REGISTRY_SCHEMA_VERSION,
+      sources: sources.map(rowToManagedSource),
+      assets: assets.map(rowToManagedAsset),
+      sync_runs: syncRuns.map(rowToManagedSyncRun),
+      updated_at: updatedAt ?? new Date().toISOString(),
+    };
+  }
+
+  async save(snapshot: ManagedRegistrySnapshot): Promise<void> {
+    const write = async (sql: ManagedRegistrySqlClient) => {
+      for (const source of snapshot.sources) {
+        await sql`
+          INSERT INTO feishu_managed_sources
+            (id, kind, name, config_json, enabled, created_at, updated_at)
+          VALUES
+            (${source.id}, ${source.kind}, ${source.name}, ${sqlJson(sql, source.config_json)},
+             ${source.enabled}, ${source.created_at}, ${source.updated_at})
+          ON CONFLICT (id) DO UPDATE SET
+            kind = EXCLUDED.kind,
+            name = EXCLUDED.name,
+            config_json = EXCLUDED.config_json,
+            enabled = EXCLUDED.enabled,
+            updated_at = EXCLUDED.updated_at
+        `;
+      }
+
+      for (const asset of snapshot.assets) {
+        await sql`
+          INSERT INTO feishu_managed_assets
+            (id, source_id, source_uri, title, content_sha256, normalized_text_uri,
+             aily_asset_id, aily_asset_title, aily_status, last_synced_at, created_at, updated_at)
+          VALUES
+            (${asset.id}, ${asset.source_id}, ${asset.source_uri}, ${asset.title},
+             ${asset.content_sha256}, ${asset.normalized_text_uri}, ${asset.aily_asset_id},
+             ${asset.aily_asset_title}, ${asset.aily_status}, ${asset.last_synced_at},
+             ${asset.created_at}, ${asset.updated_at})
+          ON CONFLICT (id) DO UPDATE SET
+            source_uri = EXCLUDED.source_uri,
+            title = EXCLUDED.title,
+            content_sha256 = EXCLUDED.content_sha256,
+            normalized_text_uri = EXCLUDED.normalized_text_uri,
+            aily_asset_id = EXCLUDED.aily_asset_id,
+            aily_asset_title = EXCLUDED.aily_asset_title,
+            aily_status = EXCLUDED.aily_status,
+            last_synced_at = EXCLUDED.last_synced_at,
+            updated_at = EXCLUDED.updated_at
+        `;
+      }
+
+      for (const syncRun of snapshot.sync_runs) {
+        await sql`
+          INSERT INTO feishu_managed_sync_runs
+            (id, trigger, source_id, status, started_at, finished_at, assets_seen,
+             assets_changed, assets_uploaded, error_summary, log_uri)
+          VALUES
+            (${syncRun.id}, ${syncRun.trigger}, ${syncRun.source_id}, ${syncRun.status},
+             ${syncRun.started_at}, ${syncRun.finished_at}, ${syncRun.assets_seen},
+             ${syncRun.assets_changed}, ${syncRun.assets_uploaded}, ${syncRun.error_summary},
+             ${syncRun.log_uri})
+          ON CONFLICT (id) DO UPDATE SET
+            status = EXCLUDED.status,
+            finished_at = EXCLUDED.finished_at,
+            assets_seen = EXCLUDED.assets_seen,
+            assets_changed = EXCLUDED.assets_changed,
+            assets_uploaded = EXCLUDED.assets_uploaded,
+            error_summary = EXCLUDED.error_summary,
+            log_uri = EXCLUDED.log_uri
+        `;
+      }
+    };
+
+    if (this.sql.begin) await this.sql.begin(write);
+    else await write(this.sql);
+  }
+}
+
+export function createPostgresManagedRegistryStore(
+  sql: ManagedRegistrySqlClient,
+  location = 'postgres',
+): PostgresManagedRegistryStore {
+  return new PostgresManagedRegistryStore(sql, location);
+}
+
+function sqlJson(sql: ManagedRegistrySqlClient, value: unknown): unknown {
+  return sql.json ? sql.json(value) : value;
+}
+
+function timestampString(value: unknown, fallback = new Date(0).toISOString()): string {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === 'string' && value.length > 0) return value;
+  return fallback;
+}
+
+function optionalTimestampString(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  return timestampString(value);
+}
+
+function optionalString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function numberOrZero(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'bigint') return Number(value);
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function latestTimestamp(values: unknown[]): string | null {
+  const times = values
+    .map((value) => {
+      const iso = optionalTimestampString(value);
+      return iso ? Date.parse(iso) : Number.NaN;
+    })
+    .filter((value) => Number.isFinite(value));
+  if (times.length === 0) return null;
+  return new Date(Math.max(...times)).toISOString();
+}
+
+function rowToManagedSource(row: Record<string, unknown>): ManagedSourceRow {
+  return {
+    id: String(row.id),
+    kind: parseManagedSourceKind(row.kind),
+    name: String(row.name),
+    config_json: objectRecord(row.config_json),
+    enabled: row.enabled !== false,
+    created_at: timestampString(row.created_at),
+    updated_at: timestampString(row.updated_at),
+  };
+}
+
+function rowToManagedAsset(row: Record<string, unknown>): ManagedAssetRow {
+  return {
+    id: String(row.id),
+    source_id: String(row.source_id),
+    source_uri: String(row.source_uri),
+    title: String(row.title),
+    content_sha256: String(row.content_sha256),
+    normalized_text_uri: String(row.normalized_text_uri),
+    aily_asset_id: optionalString(row.aily_asset_id),
+    aily_asset_title: String(row.aily_asset_title),
+    aily_status: optionalString(row.aily_status),
+    last_synced_at: optionalTimestampString(row.last_synced_at),
+    created_at: timestampString(row.created_at),
+    updated_at: timestampString(row.updated_at),
+  };
+}
+
+function rowToManagedSyncRun(row: Record<string, unknown>): ManagedSyncRunRow {
+  return {
+    id: String(row.id),
+    trigger: String(row.trigger),
+    source_id: String(row.source_id),
+    status: parseManagedSyncStatus(row.status),
+    started_at: timestampString(row.started_at),
+    finished_at: optionalTimestampString(row.finished_at),
+    assets_seen: numberOrZero(row.assets_seen),
+    assets_changed: numberOrZero(row.assets_changed),
+    assets_uploaded: numberOrZero(row.assets_uploaded),
+    error_summary: optionalString(row.error_summary),
+    log_uri: optionalString(row.log_uri),
+  };
+}
+
+function parseManagedSourceKind(value: unknown): ManagedSourceKind {
+  if (
+    value === 'doc' ||
+    value === 'drive' ||
+    value === 'wiki' ||
+    value === 'im' ||
+    value === 'base' ||
+    value === 'manual'
+  ) {
+    return value;
+  }
+  return 'manual';
+}
+
+function parseManagedSyncStatus(value: unknown): ManagedSyncStatus {
+  if (value === 'running' || value === 'completed' || value === 'partial' || value === 'failed') return value;
+  return 'failed';
 }
 
 export function cloneManagedRegistry(snapshot: ManagedRegistrySnapshot): ManagedRegistrySnapshot {

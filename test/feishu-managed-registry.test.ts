@@ -11,8 +11,41 @@ import {
   buildManagedBaseMirrorRows,
   createEmptyManagedRegistry,
   createJsonManagedRegistryStore,
+  createPostgresManagedRegistryStore,
   recordManagedSyncResult,
+  type ManagedRegistrySqlClient,
 } from '../src/core/feishu-managed-registry.ts';
+
+function makeFakeManagedSql(
+  rows: {
+    sources?: Array<Record<string, unknown>>;
+    assets?: Array<Record<string, unknown>>;
+    syncRuns?: Array<Record<string, unknown>>;
+  } = {},
+): ManagedRegistrySqlClient & { calls: string[]; values: unknown[][]; unsafeCalls: string[] } {
+  const calls: string[] = [];
+  const values: unknown[][] = [];
+  const unsafeCalls: string[] = [];
+  const sql = (async (strings: TemplateStringsArray, ...queryValues: unknown[]) => {
+    const text = strings.join('?');
+    calls.push(text);
+    values.push(queryValues);
+    if (text.includes('FROM feishu_managed_sources')) return rows.sources ?? [];
+    if (text.includes('FROM feishu_managed_assets')) return rows.assets ?? [];
+    if (text.includes('FROM feishu_managed_sync_runs')) return rows.syncRuns ?? [];
+    return [];
+  }) as ManagedRegistrySqlClient & { calls: string[]; values: unknown[][]; unsafeCalls: string[] };
+  sql.calls = calls;
+  sql.values = values;
+  sql.unsafeCalls = unsafeCalls;
+  sql.unsafe = async (query: string) => {
+    unsafeCalls.push(query);
+    return [];
+  };
+  sql.begin = async (fn) => fn(sql);
+  sql.json = (value: unknown) => ({ json: value });
+  return sql;
+}
 
 describe('Feishu managed registry', () => {
   test('records sources, assets, sync runs, and redacts secrets', () => {
@@ -137,6 +170,91 @@ describe('Feishu managed registry', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test('Postgres store loads managed registry rows as a snapshot', async () => {
+    const sql = makeFakeManagedSql({
+      sources: [{
+        id: 'feishu',
+        kind: 'manual',
+        name: 'Feishu',
+        config_json: { mirror_path: '/tmp/rbrain-feishu' },
+        enabled: true,
+        created_at: new Date('2026-06-07T10:00:00.000Z'),
+        updated_at: new Date('2026-06-07T10:00:01.000Z'),
+      }],
+      assets: [{
+        id: 'asset_1',
+        source_id: 'feishu',
+        source_uri: 'feishu/docs/roadmap.md',
+        title: 'feishu/docs/roadmap.md',
+        content_sha256: 'd'.repeat(64),
+        normalized_text_uri: 'feishu/docs/roadmap.md',
+        aily_asset_id: 'knowledge_asset_1',
+        aily_asset_title: 'rbrain-feishu-roadmap.txt',
+        aily_status: 'successful',
+        last_synced_at: new Date('2026-06-07T10:00:01.000Z'),
+        created_at: new Date('2026-06-07T10:00:00.000Z'),
+        updated_at: new Date('2026-06-07T10:00:01.000Z'),
+      }],
+      syncRuns: [{
+        id: 'sync_1',
+        trigger: 'manual',
+        source_id: 'feishu',
+        status: 'completed',
+        started_at: new Date('2026-06-07T10:00:00.000Z'),
+        finished_at: new Date('2026-06-07T10:00:01.000Z'),
+        assets_seen: '1',
+        assets_changed: 1,
+        assets_uploaded: 1,
+        error_summary: null,
+        log_uri: null,
+      }],
+    });
+    const store = createPostgresManagedRegistryStore(sql, 'managed-registry-pg-test');
+    const snapshot = await store.load();
+
+    expect(store.kind).toBe('postgres');
+    expect(store.location).toBe('managed-registry-pg-test');
+    expect(snapshot.sources[0]!.config_json.mirror_path).toBe('/tmp/rbrain-feishu');
+    expect(snapshot.assets[0]!.last_synced_at).toBe('2026-06-07T10:00:01.000Z');
+    expect(snapshot.sync_runs[0]!.assets_seen).toBe(1);
+    expect(snapshot.updated_at).toBe('2026-06-07T10:00:01.000Z');
+  });
+
+  test('Postgres store applies schema and upserts managed rows', async () => {
+    const sql = makeFakeManagedSql();
+    const store = createPostgresManagedRegistryStore(sql);
+    const recorded = recordManagedSyncResult(createEmptyManagedRegistry('2026-06-07T10:00:00.000Z'), {
+      source: {
+        id: 'feishu',
+        kind: 'manual',
+        name: 'Feishu',
+        config_json: { mirror_path: '/tmp/rbrain-feishu' },
+      },
+      trigger: 'manual',
+      started_at: '2026-06-07T10:00:00.000Z',
+      finished_at: '2026-06-07T10:00:01.000Z',
+      assets: [{
+        source_uri: 'feishu/docs/roadmap.md',
+        title: 'feishu/docs/roadmap.md',
+        content_sha256: 'e'.repeat(64),
+        normalized_text_uri: 'feishu/docs/roadmap.md',
+        aily_asset_title: 'rbrain-feishu-roadmap.txt',
+        aily_asset_id: 'knowledge_asset_1',
+        aily_status: 'successful',
+        action: 'created',
+      }],
+    });
+
+    await store.ensureSchema();
+    await store.save(recorded.snapshot);
+
+    expect(sql.unsafeCalls[0]).toContain('CREATE TABLE IF NOT EXISTS feishu_managed_sources');
+    expect(sql.calls.some((call) => call.includes('INSERT INTO feishu_managed_sources'))).toBe(true);
+    expect(sql.calls.some((call) => call.includes('INSERT INTO feishu_managed_assets'))).toBe(true);
+    expect(sql.calls.some((call) => call.includes('INSERT INTO feishu_managed_sync_runs'))).toBe(true);
+    expect(sql.values.flat()).toContainEqual({ json: { mirror_path: '/tmp/rbrain-feishu' } });
   });
 
   test('builds stable Base record fields for status mirroring', () => {

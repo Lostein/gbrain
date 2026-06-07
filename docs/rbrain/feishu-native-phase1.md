@@ -187,10 +187,13 @@ The local adapter:
   `rbrain feishu managed provision-base`
 - prints Postgres DDL for the managed registry with
   `rbrain feishu managed sql-schema`
+- includes a `PostgresManagedRegistryStore` implementation for the same
+  snapshot contract, ready to wire to a real Serverless PG / Miaoda runtime
 
 It is intentionally not the final managed backend. The sync path now talks to a
-registry store boundary, so the next slice should add a Serverless PG / Miaoda
-store implementation behind that boundary using the generated DDL.
+registry store boundary, and both the default JSON store and the Postgres store
+implement that boundary. The next slice should wire store selection to real
+Serverless PG / Miaoda configuration and run it against the managed tables.
 
 ## Acceptance Criteria
 
@@ -238,8 +241,9 @@ Manual platform checks:
 1. Confirm Miaoda platform access and runtime capabilities.
 2. Execute or adapt the generated Postgres DDL in the target Serverless PG /
    Miaoda table layer.
-3. Add a real manual/scheduled Miaoda trigger.
-4. Verify Aily Knowledge Space reaches `successful` for a managed sync asset.
-5. Verify the Aily custom agent answers using the managed asset.
-6. Decide whether `managed sync` remains a developer fixture or becomes the
+3. Wire `managed sync` or the Miaoda job to `PostgresManagedRegistryStore`.
+4. Add a real manual/scheduled Miaoda trigger.
+5. Verify Aily Knowledge Space reaches `successful` for a managed sync asset.
+6. Verify the Aily custom agent answers using the managed asset.
+7. Decide whether `managed sync` remains a developer fixture or becomes the
    canonical debugging client for the online control plane.
