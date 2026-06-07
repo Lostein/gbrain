@@ -194,6 +194,9 @@ The local adapter:
   `RBRAIN_FEISHU_MANAGED_DATABASE_URL`
 - adds `rbrain feishu managed status` so JSON or Postgres registry state can be
   inspected before a full Aily push
+- adds `rbrain feishu managed refresh-status` to re-read Aily Knowledge Space
+  asset states after asynchronous learning and mirror the refreshed status to
+  registry/Base without re-uploading content
 - extracts `runManagedSyncJob` so a Miaoda/server-function trigger can reuse
   the same sync implementation instead of shelling out to the CLI
 - adds `runManagedTrigger` as the thin server-function adapter for `status` and
@@ -242,6 +245,8 @@ Local tests:
 - Aily create/update/skip mocked responses
 - Base mirror mocked responses
 - managed status JSON output for registry counts and latest run
+- direct `runManagedRefreshStatusJob` coverage for Aily status refresh,
+  registry persistence, Base mirror handoff, and token redaction
 - direct `runManagedSyncJob` invocation without the CLI dispatcher
 - direct `runManagedTrigger` invocation for server-function `status` and `sync`
   requests
@@ -265,6 +270,8 @@ Manual platform checks:
 - Miaoda scheduled/manual trigger runs.
 - Serverless PG tables are created and queryable.
 - Aily Knowledge Space receives an asset and reaches `successful`.
+- `managed refresh-status` observes that `successful` state and updates the
+  registry/Base row.
 - Feishu Base shows a readable asset row.
 - Aily agent can answer a question using the uploaded asset.
 
@@ -291,6 +298,8 @@ Manual platform checks:
    separate `managed probe` status/sync
    checks.
 6. Verify Aily Knowledge Space reaches `successful` for a managed sync asset.
-7. Verify the Aily custom agent answers using the managed asset.
-8. Decide whether `managed sync` remains a developer fixture or becomes the
+7. Run `managed refresh-status` against the same registry store and verify the
+   Base status row updates without a second content upload.
+8. Verify the Aily custom agent answers using the managed asset.
+9. Decide whether `managed sync` remains a developer fixture or becomes the
    canonical debugging client for the online control plane.

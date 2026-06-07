@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withEnv } from './helpers/with-env.ts';
-import { defaultManagedRegistryPath, recordManagedSyncResult, saveManagedRegistry, createEmptyManagedRegistry } from '../src/core/feishu-managed-registry.ts';
+import { defaultManagedRegistryPath, recordManagedSyncResult, saveManagedRegistry, createEmptyManagedRegistry, loadManagedRegistry } from '../src/core/feishu-managed-registry.ts';
 import {
   FEISHU_DOCTOR_CAPABILITY_CHECKS,
   FEISHU_MIRROR_DIRS,
@@ -72,6 +72,7 @@ import {
   parseDocManifest,
   pushAilyKnowledgeSpace,
   resolveManagedRegistryStoreConfig,
+  runManagedRefreshStatusJob,
   runManagedSyncJob,
   runManagedTrigger,
   runManagedTriggerCanary,
@@ -336,6 +337,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('--registry-url POSTGRES_URL');
     expect(stdout).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
     expect(stdout).toContain('managed status [--path DIR]');
+    expect(stdout).toContain('managed refresh-status [--path DIR]');
     expect(stdout).toContain('managed base-template [--json]');
     expect(stdout).toContain('managed trigger-template [--json]');
     expect(stdout).toContain('managed deploy-bundle [--out DIR]');
@@ -1241,6 +1243,88 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.latest_sync_run.assets_seen).toBe(1);
     expect(payload.aily_statuses).toEqual({ successful: 1 });
     expect(payload.base_mirror.preview).toHaveLength(1);
+  });
+
+  test('managed refresh-status job re-reads Aily statuses without leaking the token', async () => {
+    const root = makeTempDir('rbrain-feishu-managed-refresh-status-');
+    const candidates = collectAilyPushCandidates(root);
+    const seed = recordManagedSyncResult(createEmptyManagedRegistry('2026-06-07T10:00:00.000Z'), {
+      source: { id: 'feishu', kind: 'manual', name: 'Feishu' },
+      trigger: 'manual',
+      started_at: '2026-06-07T10:00:00.000Z',
+      finished_at: '2026-06-07T10:00:01.000Z',
+      assets: candidates.map((candidate, idx) => ({
+        source_uri: candidate.source_url,
+        title: candidate.relative_path,
+        content_sha256: candidate.content_sha256,
+        normalized_text_uri: candidate.relative_path,
+        aily_asset_title: candidate.title,
+        aily_asset_id: `knowledge_asset_${idx}`,
+        aily_status: 'learning',
+        action: 'created',
+      })),
+    });
+    saveManagedRegistry(defaultManagedRegistryPath(root), seed.snapshot);
+
+    let mirroredStatus = '';
+    const job = await runManagedRefreshStatusJob({
+      root,
+      env: { RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN: 'aily-secret-token' },
+      opts: {
+        path: root,
+        sourceId: 'feishu',
+        host: 'https://apaas.feishu.cn',
+        knowledgeSpaceId: 'knowledge_space_test',
+        tokenEnv: 'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN',
+        dryRun: false,
+        json: true,
+        registryStore: 'json',
+        registryEnsureSchema: false,
+        baseToken: 'base-secret-token',
+        baseTableId: 'tbl_test',
+      },
+      fetchImpl: async (_url, init) => {
+        if (!init) throw new Error('expected Aily list request init');
+        expect(init.headers).toMatchObject({ 'x-api-token': 'aily-secret-token' });
+        return new Response(JSON.stringify({
+          status_code: '0',
+          data: {
+            knowledge_assets: [
+              { name: candidates[0]!.title, knowledge_asset_id: 'knowledge_asset_0', status: 'successful' },
+            ],
+            has_more: false,
+            total: 1,
+          },
+        }));
+      },
+      mirrorBaseRows: ({ rows }) => {
+        mirroredStatus = rows[0]?.aily_status ?? '';
+        return {
+          status: 'ok',
+          configured: true,
+          dry_run: false,
+          created: 0,
+          updated: rows.length,
+          failed: 0,
+          errors: [],
+        };
+      },
+    });
+
+    expect(job.payload.status).toBe('ok');
+    expect(job.payload.persisted).toBe(true);
+    expect(job.payload.checked).toBe(1);
+    expect(job.payload.updated).toBe(1);
+    expect(job.payload.assets[0]!.previous_status).toBe('learning');
+    expect(job.payload.assets[0]!.current_status).toBe('successful');
+    expect(job.payload.base_mirror.configured).toBe(true);
+    expect(mirroredStatus).toBe('successful');
+    expect(JSON.stringify(job.payload)).not.toContain('aily-secret-token');
+    expect(JSON.stringify(job.payload)).not.toContain('base-secret-token');
+
+    const saved = loadManagedRegistry(defaultManagedRegistryPath(root));
+    expect(saved.assets[0]!.aily_status).toBe('successful');
+    expect(saved.assets[0]!.last_synced_at).toBe('2026-06-07T10:00:01.000Z');
   });
 
   test('managed base-template prints the status table field contract', () => {

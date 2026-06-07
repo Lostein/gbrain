@@ -22,6 +22,7 @@ import {
   createPostgresManagedRegistryStore,
   defaultManagedRegistryPath,
   recordManagedSyncResult,
+  type ManagedAssetRow,
   type ManagedAssetObservation,
   type ManagedBaseMirrorRow,
   type ManagedRegistrySqlClient,
@@ -309,6 +310,17 @@ export interface ManagedRegistryStatusOpts {
   registryUrl?: string;
   registryEnsureSchema: boolean;
   json: boolean;
+}
+
+export interface ManagedRefreshStatusOpts extends ManagedRegistryStatusOpts {
+  host: string;
+  knowledgeSpaceId: string;
+  tokenEnv: string;
+  dryRun: boolean;
+  limit?: number;
+  baseToken?: string;
+  baseTableId?: string;
+  baseAs?: string;
 }
 
 interface ManagedBaseProvisionOpts {
@@ -917,6 +929,28 @@ function parseManagedSync(
     baseToken: parseFlagValue(args, '--base-token'),
     baseTableId: parseFlagValue(args, '--base-table-id'),
     baseAs: parseFlagValue(args, '--base-as'),
+  };
+}
+
+function parseManagedRefreshStatus(
+  args: string[],
+  env: EnvLookup = process.env,
+  opts: { requireKnowledgeSpaceId?: boolean; requireRegistryUrl?: boolean } = {},
+): ManagedRefreshStatusOpts {
+  const aily = parseAilyPushSpace(args, env, opts);
+  return {
+    path: aily.path,
+    sourceId: aily.sourceId,
+    host: aily.host,
+    knowledgeSpaceId: aily.knowledgeSpaceId,
+    tokenEnv: aily.tokenEnv,
+    dryRun: aily.dryRun,
+    limit: aily.limit,
+    ...resolveManagedRegistryFlags(args, env, { ...opts, command: 'refresh-status' }),
+    baseToken: parseFlagValue(args, '--base-token'),
+    baseTableId: parseFlagValue(args, '--base-table-id'),
+    baseAs: parseFlagValue(args, '--base-as'),
+    json: aily.json,
   };
 }
 
@@ -5278,6 +5312,261 @@ function mirrorManagedBaseRows(opts: {
 
 type ManagedBaseMirrorRowsImpl = typeof mirrorManagedBaseRows;
 
+type ManagedRefreshStatusMatch = 'id' | 'title' | 'none';
+
+export interface ManagedRefreshStatusAssetResult {
+  id: string;
+  source_id: string;
+  source_uri: string;
+  title: string;
+  aily_asset_title: string;
+  previous_aily_asset_id: string | null;
+  current_aily_asset_id: string | null;
+  previous_status: string | null;
+  current_status: string | null;
+  matched: boolean;
+  matched_by: ManagedRefreshStatusMatch;
+  changed: boolean;
+}
+
+function ailyAssetStatus(asset: AilyAssetRow | undefined): string {
+  if (!asset) return 'missing';
+  return asset.status ?? 'unknown';
+}
+
+function indexAilyAssets(assets: AilyAssetRow[]): {
+  byId: Map<string, AilyAssetRow>;
+  byTitle: Map<string, AilyAssetRow>;
+} {
+  const byId = new Map<string, AilyAssetRow>();
+  const byTitle = new Map<string, AilyAssetRow>();
+  for (const asset of assets) {
+    if (asset.knowledge_asset_id && !byId.has(asset.knowledge_asset_id)) {
+      byId.set(asset.knowledge_asset_id, asset);
+    }
+    const title = ailyAssetName(asset);
+    if (title && !byTitle.has(title)) byTitle.set(title, asset);
+  }
+  return { byId, byTitle };
+}
+
+function refreshManagedRegistryAilyStatuses(opts: {
+  snapshot: ManagedRegistrySnapshot;
+  sourceId: string;
+  ailyAssets: AilyAssetRow[];
+  now: string;
+  limit?: number;
+}): {
+  snapshot: ManagedRegistrySnapshot;
+  assets: ManagedRefreshStatusAssetResult[];
+  checked: number;
+  matched: number;
+  missing: number;
+  updated: number;
+  aily_statuses: Record<string, number>;
+} {
+  const next = cloneManagedRegistry(opts.snapshot);
+  const { byId, byTitle } = indexAilyAssets(opts.ailyAssets);
+  const targetAssets = next.assets
+    .filter((asset) => asset.source_id === opts.sourceId)
+    .sort((a, b) => a.source_uri.localeCompare(b.source_uri))
+    .slice(0, opts.limit ?? undefined);
+
+  const assets: ManagedRefreshStatusAssetResult[] = [];
+  let matched = 0;
+  let missing = 0;
+  let updated = 0;
+
+  for (const asset of targetAssets) {
+    const previousAssetId = asset.aily_asset_id;
+    const previousStatus = asset.aily_status;
+    let observed: AilyAssetRow | undefined;
+    let matchedBy: ManagedRefreshStatusMatch = 'none';
+    if (asset.aily_asset_id) {
+      observed = byId.get(asset.aily_asset_id);
+      if (observed) matchedBy = 'id';
+    }
+    if (!observed) {
+      observed = byTitle.get(asset.aily_asset_title);
+      if (observed) matchedBy = 'title';
+    }
+
+    const currentAssetId = observed?.knowledge_asset_id ?? asset.aily_asset_id;
+    const currentStatus = ailyAssetStatus(observed);
+    const changed =
+      previousAssetId !== (currentAssetId ?? null) ||
+      previousStatus !== currentStatus;
+    if (changed) {
+      asset.aily_asset_id = currentAssetId ?? null;
+      asset.aily_status = currentStatus;
+      asset.updated_at = opts.now;
+      updated++;
+    }
+    if (observed) matched++;
+    else missing++;
+    assets.push({
+      id: asset.id,
+      source_id: asset.source_id,
+      source_uri: asset.source_uri,
+      title: asset.title,
+      aily_asset_title: asset.aily_asset_title,
+      previous_aily_asset_id: previousAssetId,
+      current_aily_asset_id: currentAssetId ?? null,
+      previous_status: previousStatus,
+      current_status: currentStatus,
+      matched: Boolean(observed),
+      matched_by: matchedBy,
+      changed,
+    });
+  }
+
+  if (updated > 0) next.updated_at = opts.now;
+  return {
+    snapshot: next,
+    assets,
+    checked: targetAssets.length,
+    matched,
+    missing,
+    updated,
+    aily_statuses: countManagedAilyStatuses(next),
+  };
+}
+
+function buildManagedRefreshStatusPayload(opts: {
+  registryPath: string;
+  registryStore: ManagedRegistryStore;
+  persisted: boolean;
+  dryRun: boolean;
+  knowledgeSpaceId: string;
+  ailyAssetsSeen: number;
+  refresh: ReturnType<typeof refreshManagedRegistryAilyStatuses>;
+  baseRows: ManagedBaseMirrorRow[];
+  baseWrite: ManagedBaseMirrorWriteResult;
+}) {
+  return {
+    status: opts.refresh.missing > 0 ? 'partial' : 'ok',
+    dry_run: opts.dryRun,
+    persisted: opts.persisted,
+    registry_path: opts.registryPath,
+    registry_store: {
+      kind: opts.registryStore.kind,
+      location: opts.registryStore.location,
+    },
+    knowledge_space_id: opts.knowledgeSpaceId,
+    aily_assets_seen: opts.ailyAssetsSeen,
+    checked: opts.refresh.checked,
+    matched: opts.refresh.matched,
+    missing: opts.refresh.missing,
+    updated: opts.refresh.updated,
+    aily_statuses: opts.refresh.aily_statuses,
+    assets: opts.refresh.assets,
+    base_mirror: {
+      status: opts.baseWrite.status,
+      configured: opts.baseWrite.configured,
+      dry_run: opts.baseWrite.dry_run,
+      rows: opts.baseRows.length,
+      created: opts.baseWrite.created,
+      updated: opts.baseWrite.updated,
+      failed: opts.baseWrite.failed,
+      errors: opts.baseWrite.errors,
+      preview: opts.baseRows.slice(0, 20),
+    },
+  };
+}
+
+function printManagedRefreshStatusResult(payload: ReturnType<typeof buildManagedRefreshStatusPayload>): void {
+  console.log(`Feishu managed Aily status refresh: ${payload.status}`);
+  console.log(`  registry: ${payload.registry_path}${payload.persisted ? '' : ' (not written)'}`);
+  console.log(
+    `  Aily: ${payload.aily_assets_seen} remote assets, ${payload.checked} checked, ` +
+    `${payload.matched} matched, ${payload.missing} missing`,
+  );
+  const statuses = Object.entries(payload.aily_statuses)
+    .map(([status, count]) => `${status}=${count}`)
+    .join(', ');
+  console.log(`  statuses: ${statuses || 'none'}`);
+  console.log(
+    `  Base mirror: ${payload.base_mirror.status}, ${payload.base_mirror.rows} rows, ` +
+    `${payload.base_mirror.created} created, ${payload.base_mirror.updated} updated, ` +
+    `${payload.base_mirror.failed} failed`,
+  );
+}
+
+export interface ManagedRefreshStatusJobInput {
+  root: string;
+  opts: ManagedRefreshStatusOpts;
+  env: EnvLookup;
+  storeConfig?: ManagedRegistryStoreConfig;
+  createStoreHandle?: typeof createManagedRegistryStoreHandle;
+  mirrorBaseRows?: ManagedBaseMirrorRowsImpl;
+  fetchImpl?: FetchLike;
+}
+
+export async function runManagedRefreshStatusJob(input: ManagedRefreshStatusJobInput) {
+  const storeConfig = input.storeConfig ?? resolveManagedRegistryStoreConfig({
+    kind: input.opts.registryStore,
+    root: input.root,
+    registryPath: input.opts.registryPath,
+    registryUrl: input.opts.registryUrl,
+    ensureSchema: input.opts.registryEnsureSchema,
+  });
+  const registryPath = storeConfig.location;
+  const createStoreHandle = input.createStoreHandle ?? createManagedRegistryStoreHandle;
+  const registryHandle = await createStoreHandle(storeConfig);
+  const registryStore = registryHandle.store;
+  try {
+    const registry = await registryStore.load();
+    const sourceAssets = registry.assets.filter((asset) => asset.source_id === input.opts.sourceId);
+    const needsToken = sourceAssets.length > 0;
+    const token = needsToken
+      ? resolveAilyApiToken(input.opts.tokenEnv, input.env)
+      : { token: '', source: '(not needed)' };
+    const ailyAssets = needsToken
+      ? await listAilyKnowledgeAssets({
+          host: input.opts.host,
+          knowledgeSpaceId: input.opts.knowledgeSpaceId,
+          token: token.token,
+          fetchImpl: input.fetchImpl,
+        })
+      : [];
+    const refresh = refreshManagedRegistryAilyStatuses({
+      snapshot: registry,
+      sourceId: input.opts.sourceId,
+      ailyAssets,
+      now: new Date().toISOString(),
+      limit: input.opts.limit,
+    });
+    if (!input.opts.dryRun && refresh.updated > 0) await registryStore.save(refresh.snapshot);
+    const baseRows = buildManagedBaseMirrorRows(refresh.snapshot);
+    const mirrorBaseRows = input.mirrorBaseRows ?? mirrorManagedBaseRows;
+    const baseWrite = mirrorBaseRows({
+      rows: baseRows,
+      baseToken: input.opts.baseToken,
+      tableId: input.opts.baseTableId,
+      as: input.opts.baseAs,
+      dryRun: input.opts.dryRun,
+    });
+    const payload = buildManagedRefreshStatusPayload({
+      registryPath,
+      registryStore,
+      persisted: !input.opts.dryRun && refresh.updated > 0,
+      dryRun: input.opts.dryRun,
+      knowledgeSpaceId: input.opts.knowledgeSpaceId,
+      ailyAssetsSeen: ailyAssets.length,
+      refresh,
+      baseRows,
+      baseWrite,
+    });
+
+    return {
+      payload,
+      tokenSource: token.source,
+    };
+  } finally {
+    await registryHandle.close?.();
+  }
+}
+
 export interface ManagedSyncJobInput {
   root: string;
   opts: ManagedSyncOpts;
@@ -6461,8 +6750,39 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     else printManagedRegistryStatusResult(payload);
     return;
   }
+  if (sub === 'refresh-status') {
+    const rawArgs = args.slice(1);
+    const initialOpts = parseManagedRefreshStatus(rawArgs, loadAilyEnv(rawArgs), {
+      requireKnowledgeSpaceId: false,
+      requireRegistryUrl: false,
+    });
+    const root = await resolveManagedRegistryRoot(engine, initialOpts, 'refresh-status');
+    const env = loadAilyEnv(rawArgs, root);
+    const opts = parseManagedRefreshStatus(rawArgs, env);
+    const storeConfig = resolveManagedRegistryStoreConfig({
+      kind: opts.registryStore,
+      root,
+      registryPath: opts.registryPath,
+      registryUrl: opts.registryUrl,
+      ensureSchema: opts.registryEnsureSchema,
+    });
+    const job = await runManagedRefreshStatusJob({
+      root,
+      opts,
+      env,
+      storeConfig,
+    });
+    if (opts.json) {
+      console.log(JSON.stringify(job.payload, null, 2));
+    } else {
+      printManagedRefreshStatusResult(job.payload);
+      if (job.payload.checked > 0) console.log(`  token source: ${job.tokenSource}`);
+    }
+    if (job.payload.status === 'partial' || job.payload.base_mirror.failed > 0) process.exitCode = 1;
+    return;
+  }
   if (sub !== 'sync') {
-    throw new Error(`Usage: ${brand()} feishu managed <sync|status|base-template|trigger-template|deploy-bundle|env-check|probe|canary|provision-base|sql-schema> [options]`);
+    throw new Error(`Usage: ${brand()} feishu managed <sync|refresh-status|status|base-template|trigger-template|deploy-bundle|env-check|probe|canary|provision-base|sql-schema> [options]`);
   }
 
   const rawArgs = args.slice(1);
@@ -6905,6 +7225,11 @@ COMMANDS
                  [--registry-ensure-schema] [--json]
       Inspect managed registry counts, latest sync run, Aily statuses, and Base preview rows.
 
+  managed refresh-status [--path DIR] [--registry-store json|postgres] [--registry-url POSTGRES_URL]
+                         [--space-id knowledge_space_xxx] [--dry-run]
+                         [--base-token TOKEN --base-table-id TABLE] [--json]
+      Re-read Aily knowledge asset statuses and update registry/Base status rows.
+
   managed base-template [--json]
       Print the Feishu Base field template used by managed sync status mirroring.
 
@@ -6967,8 +7292,10 @@ EXAMPLES
   ${brand()} feishu managed sql-schema > feishu-managed-registry.sql
   ${brand()} feishu managed provision-base --base-token appxxx --table-name "RBrain Managed Assets" --dry-run --json
   ${brand()} feishu managed sync --path ~/rbrain-feishu --space-id knowledge_space_xxx --dry-run --json
+  ${brand()} feishu managed refresh-status --path ~/rbrain-feishu --space-id knowledge_space_xxx --json
   ${brand()} feishu managed status --path ~/rbrain-feishu --json
   ${brand()} feishu managed sync --path ~/rbrain-feishu --registry-store postgres --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --registry-ensure-schema --space-id knowledge_space_xxx
+  ${brand()} feishu managed refresh-status --registry-store postgres --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --space-id knowledge_space_xxx --json
   ${brand()} feishu managed status --registry-store postgres --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --json
   ${AILY_DEFAULT_TOKEN_ENV}=... ${brand()} feishu aily push-space --space-id knowledge_space_xxx
   ${brand()} feishu doctor

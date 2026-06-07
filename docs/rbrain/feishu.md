@@ -180,6 +180,25 @@ rbrain feishu managed status \
 The status command does not require an Aily token. It reports source/asset/run
 counts, the latest sync run, Aily status counts, and a Base mirror preview.
 
+Because Aily learns uploaded knowledge assets asynchronously, `managed sync`
+only records the status returned during upload. After the Feishu-side learning
+job has had time to finish, refresh the registry from Aily:
+
+```bash
+RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=... \
+  rbrain feishu managed refresh-status \
+  --path ~/rbrain-feishu \
+  --space-id knowledge_space_xxx \
+  --json
+```
+
+`managed refresh-status` lists the current Aily knowledge assets, matches them
+by asset id first and deterministic title second, updates `aily_status` in the
+registry, and marks missing remote assets as `missing`. It does not change
+`last_synced_at`, which remains the content upload timestamp. Add
+`--base-token` and `--base-table-id` to mirror the refreshed status rows into
+Feishu Base.
+
 For an online trigger, first emit the deployable TypeScript wrapper:
 
 ```bash
@@ -330,6 +349,10 @@ rbrain feishu managed sync --path ~/rbrain-feishu \
 The command searches the table by `Source URI`. If a matching record exists, it
 updates that record; otherwise it creates one. The Base token is never printed
 in JSON output.
+
+The same Base mirror flags are supported by `managed refresh-status`, so the
+Base table can reflect Aily's latest learning state without re-uploading
+unchanged Markdown snapshots.
 
 For Serverless PG / Miaoda storage, emit the managed registry DDL:
 
