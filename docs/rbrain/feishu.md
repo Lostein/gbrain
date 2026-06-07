@@ -257,12 +257,17 @@ Before deploying, check the runtime environment without printing values:
 ```bash
 rbrain feishu managed env-check --target canary --env-file ./feishu-managed-deploy/.env.example --json
 rbrain feishu managed env-check --target sync --json
+rbrain feishu managed deploy-plan --url https://example.com/trigger --json
 ```
 
 `--target status` requires only the Serverless PG URL. `--target canary`
 requires PG, mirror root, Aily Knowledge Space ID, and the Aily token because
 the canary includes a refresh-status probe. `--target sync` treats the same
 Aily token as required before real scheduled sync or `--no-dry-run`.
+`managed deploy-plan` reuses the canary env check, then prints an ordered,
+secret-safe sequence for registry provisioning, trigger deployment, status-only
+canary, production canary with `--wait-status`, registry inspection, and the
+final Aily custom-agent answer check.
 
 Before or after deployment, generate the exact probe bodies:
 
