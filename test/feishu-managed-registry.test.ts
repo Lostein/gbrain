@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  FEISHU_MANAGED_SQL_SCHEMA_VERSION,
   MANAGED_BASE_FIELD_NAMES,
   buildManagedBaseRecordFields,
   buildManagedBaseTableFieldsJson,
+  buildManagedRegistrySqlSchema,
   buildManagedBaseMirrorRows,
   createEmptyManagedRegistry,
   recordManagedSyncResult,
@@ -117,5 +119,18 @@ describe('Feishu managed registry', () => {
       name: MANAGED_BASE_FIELD_NAMES.sourceUri,
       type: 'text',
     });
+  });
+
+  test('builds Postgres DDL for the managed registry tables', () => {
+    const sql = buildManagedRegistrySqlSchema();
+
+    expect(FEISHU_MANAGED_SQL_SCHEMA_VERSION).toBe(1);
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS feishu_managed_sources');
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS feishu_managed_assets');
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS feishu_managed_sync_runs');
+    expect(sql).toContain("kind IN ('doc', 'drive', 'wiki', 'im', 'base', 'manual')");
+    expect(sql).toContain("status IN ('running', 'completed', 'partial', 'failed')");
+    expect(sql).toContain('UNIQUE (source_id, source_uri)');
+    expect(sql).toContain('feishu_managed_sync_runs_source_started_idx');
   });
 });

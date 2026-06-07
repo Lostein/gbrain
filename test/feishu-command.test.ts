@@ -322,6 +322,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('managed sync [--path DIR]');
     expect(stdout).toContain('Prototype a Feishu-native managed asset registry');
     expect(stdout).toContain('managed base-template [--json]');
+    expect(stdout).toContain('managed sql-schema [--json]');
     expect(stdout).toContain('managed provision-base --base-token TOKEN');
   });
 
@@ -499,6 +500,26 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.table_name).toBe('RBrain Managed Assets');
     expect(payload.fields).toContainEqual({ name: 'Source URI', type: 'text' });
     expect(payload.fields).toContainEqual({ name: 'Aily Status', type: 'text' });
+  });
+
+  test('managed sql-schema prints Postgres DDL for the registry tables', () => {
+    const proc = Bun.spawnSync({
+      cmd: ['bun', 'run', 'src/rbrain.ts', 'feishu', 'managed', 'sql-schema', '--json'],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      schema_version: number;
+      dialect: string;
+      sql: string;
+    };
+    expect(payload.schema_version).toBe(1);
+    expect(payload.dialect).toBe('postgres');
+    expect(payload.sql).toContain('feishu_managed_sources');
+    expect(payload.sql).toContain('feishu_managed_assets');
+    expect(payload.sql).toContain('feishu_managed_sync_runs');
   });
 
   test('managed provision-base creates the Base status table without leaking the token', () => {

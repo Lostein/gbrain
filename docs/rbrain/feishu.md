@@ -179,6 +179,17 @@ The command searches the table by `Source URI`. If a matching record exists, it
 updates that record; otherwise it creates one. The Base token is never printed
 in JSON output.
 
+For Serverless PG / Miaoda storage, emit the managed registry DDL:
+
+```bash
+rbrain feishu managed sql-schema > feishu-managed-registry.sql
+```
+
+The schema creates `feishu_managed_sources`, `feishu_managed_assets`, and
+`feishu_managed_sync_runs` with the same fields used by the local JSON registry,
+plus uniqueness constraints for `(source_id, source_uri)` and deterministic Aily
+asset titles.
+
 For the proposed Feishu-native managed architecture, where Aily Knowledge Space
 is the runtime knowledge backend, Miaoda hosts the online control plane, and
 local RBrain becomes optional developer tooling, see

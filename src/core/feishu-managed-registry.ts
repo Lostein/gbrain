@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 
 export const FEISHU_MANAGED_REGISTRY_SCHEMA_VERSION = 1;
+export const FEISHU_MANAGED_SQL_SCHEMA_VERSION = 1;
 
 export type ManagedSourceKind = 'doc' | 'drive' | 'wiki' | 'im' | 'base' | 'manual';
 export type ManagedSyncStatus = 'running' | 'completed' | 'partial' | 'failed';
@@ -283,4 +284,68 @@ export function buildManagedBaseRecordFields(row: ManagedBaseMirrorRow): Managed
 
 export function buildManagedBaseTableFieldsJson(): Array<{ name: ManagedBaseFieldName; type: 'text' }> {
   return Object.values(MANAGED_BASE_FIELD_NAMES).map((name) => ({ name, type: 'text' as const }));
+}
+
+export function buildManagedRegistrySqlSchema(): string {
+  return [
+    '-- RBrain Feishu Native managed registry schema',
+    `-- schema_version: ${FEISHU_MANAGED_SQL_SCHEMA_VERSION}`,
+    '',
+    'CREATE TABLE IF NOT EXISTS feishu_managed_sources (',
+    '  id TEXT PRIMARY KEY,',
+    "  kind TEXT NOT NULL CHECK (kind IN ('doc', 'drive', 'wiki', 'im', 'base', 'manual')),",
+    '  name TEXT NOT NULL,',
+    "  config_json JSONB NOT NULL DEFAULT '{}'::jsonb,",
+    '  enabled BOOLEAN NOT NULL DEFAULT TRUE,',
+    '  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),',
+    '  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()',
+    ');',
+    '',
+    'CREATE TABLE IF NOT EXISTS feishu_managed_assets (',
+    '  id TEXT PRIMARY KEY,',
+    '  source_id TEXT NOT NULL REFERENCES feishu_managed_sources(id) ON DELETE CASCADE,',
+    '  source_uri TEXT NOT NULL,',
+    '  title TEXT NOT NULL,',
+    '  content_sha256 TEXT NOT NULL CHECK (content_sha256 ~ \'^[a-f0-9]{64}$\'),',
+    '  normalized_text_uri TEXT NOT NULL,',
+    '  aily_asset_id TEXT,',
+    '  aily_asset_title TEXT NOT NULL,',
+    '  aily_status TEXT,',
+    '  last_synced_at TIMESTAMPTZ,',
+    '  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),',
+    '  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),',
+    '  UNIQUE (source_id, source_uri),',
+    '  UNIQUE (source_id, aily_asset_title)',
+    ');',
+    '',
+    'CREATE TABLE IF NOT EXISTS feishu_managed_sync_runs (',
+    '  id TEXT PRIMARY KEY,',
+    '  trigger TEXT NOT NULL,',
+    '  source_id TEXT NOT NULL REFERENCES feishu_managed_sources(id) ON DELETE CASCADE,',
+    "  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'partial', 'failed')),",
+    '  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),',
+    '  finished_at TIMESTAMPTZ,',
+    '  assets_seen INTEGER NOT NULL DEFAULT 0 CHECK (assets_seen >= 0),',
+    '  assets_changed INTEGER NOT NULL DEFAULT 0 CHECK (assets_changed >= 0),',
+    '  assets_uploaded INTEGER NOT NULL DEFAULT 0 CHECK (assets_uploaded >= 0),',
+    '  error_summary TEXT,',
+    '  log_uri TEXT',
+    ');',
+    '',
+    'CREATE INDEX IF NOT EXISTS feishu_managed_sources_enabled_idx',
+    '  ON feishu_managed_sources (enabled) WHERE enabled = TRUE;',
+    '',
+    'CREATE INDEX IF NOT EXISTS feishu_managed_assets_source_idx',
+    '  ON feishu_managed_assets (source_id);',
+    '',
+    'CREATE INDEX IF NOT EXISTS feishu_managed_assets_aily_status_idx',
+    '  ON feishu_managed_assets (aily_status);',
+    '',
+    'CREATE INDEX IF NOT EXISTS feishu_managed_assets_last_synced_idx',
+    '  ON feishu_managed_assets (last_synced_at DESC);',
+    '',
+    'CREATE INDEX IF NOT EXISTS feishu_managed_sync_runs_source_started_idx',
+    '  ON feishu_managed_sync_runs (source_id, started_at DESC);',
+    '',
+  ].join('\n');
 }

@@ -185,10 +185,12 @@ The local adapter:
 - prints the Base field contract with `rbrain feishu managed base-template`
 - can create the status table in an existing Base with
   `rbrain feishu managed provision-base`
+- prints Postgres DDL for the managed registry with
+  `rbrain feishu managed sql-schema`
 
 It is intentionally not the final managed backend. The next slice should replace
-or wrap the JSON registry with Serverless PG / Miaoda storage, then move the
-remaining setup into a Feishu-native provisioning flow.
+or wrap the JSON registry with a Serverless PG / Miaoda storage adapter using
+the generated DDL.
 
 ## Acceptance Criteria
 
@@ -234,7 +236,7 @@ Manual platform checks:
 ## Next Implementation Tasks
 
 1. Confirm Miaoda platform access and runtime capabilities.
-2. Replace or wrap the local JSON registry with the target Serverless PG /
+2. Execute or adapt the generated Postgres DDL in the target Serverless PG /
    Miaoda table layer.
 3. Add a real manual/scheduled Miaoda trigger.
 4. Verify Aily Knowledge Space reaches `successful` for a managed sync asset.

@@ -9,9 +9,11 @@ import { assertValidSourceId } from '../core/source-id.ts';
 import { addSource as addBrainSource, SourceOpError } from '../core/sources-ops.ts';
 import {
   MANAGED_BASE_FIELD_NAMES,
+  FEISHU_MANAGED_SQL_SCHEMA_VERSION,
   buildManagedBaseRecordFields,
   buildManagedBaseTableFieldsJson,
   buildManagedBaseMirrorRows,
+  buildManagedRegistrySqlSchema,
   cloneManagedRegistry,
   defaultManagedRegistryPath,
   loadManagedRegistry,
@@ -5008,6 +5010,19 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     printManagedBaseTemplate(args.includes('--json'));
     return;
   }
+  if (sub === 'sql-schema') {
+    const sql = buildManagedRegistrySqlSchema();
+    if (args.includes('--json')) {
+      console.log(JSON.stringify({
+        schema_version: FEISHU_MANAGED_SQL_SCHEMA_VERSION,
+        dialect: 'postgres',
+        sql,
+      }, null, 2));
+    } else {
+      console.log(sql);
+    }
+    return;
+  }
   if (sub === 'provision-base') {
     const payload = provisionManagedBaseTable(parseManagedBaseProvision(args.slice(1)));
     if (args.includes('--json')) console.log(JSON.stringify(payload, null, 2));
@@ -5551,6 +5566,9 @@ COMMANDS
   managed base-template [--json]
       Print the Feishu Base field template used by managed sync status mirroring.
 
+  managed sql-schema [--json]
+      Print the Postgres DDL for the managed sources/assets/sync_runs registry.
+
   managed provision-base --base-token TOKEN [--table-name NAME] [--dry-run] [--json]
       Create the managed asset status table in an existing Feishu Base.
 
@@ -5583,6 +5601,7 @@ EXAMPLES
   ${brand()} feishu pull im-chat-messages --chat-id oc_xxx --sync
   ${brand()} feishu aily push-space --space-id knowledge_space_xxx --dry-run
   ${brand()} feishu managed base-template --json
+  ${brand()} feishu managed sql-schema > feishu-managed-registry.sql
   ${brand()} feishu managed provision-base --base-token appxxx --table-name "RBrain Managed Assets" --dry-run --json
   ${brand()} feishu managed sync --path ~/rbrain-feishu --space-id knowledge_space_xxx --dry-run --json
   ${AILY_DEFAULT_TOKEN_ENV}=... ${brand()} feishu aily push-space --space-id knowledge_space_xxx
