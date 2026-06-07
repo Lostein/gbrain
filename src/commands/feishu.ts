@@ -15,13 +15,13 @@ import {
   buildManagedBaseMirrorRows,
   buildManagedRegistrySqlSchema,
   cloneManagedRegistry,
+  createJsonManagedRegistryStore,
   defaultManagedRegistryPath,
-  loadManagedRegistry,
   recordManagedSyncResult,
-  saveManagedRegistry,
   type ManagedAssetObservation,
   type ManagedBaseMirrorRow,
   type ManagedRegistrySnapshot,
+  type ManagedRegistryStore,
   type ManagedSourceKind,
   type ManagedSyncRunRow,
 } from '../core/feishu-managed-registry.ts';
@@ -4685,6 +4685,7 @@ function managedObservationFromAilyAsset(asset: AilyPushItemResult): ManagedAsse
 
 function buildManagedSyncPayload(opts: {
   registryPath: string;
+  registryStore: ManagedRegistryStore;
   persisted: boolean;
   syncRun: ManagedSyncRunRow;
   push: AilyPushSpaceResult;
@@ -4696,6 +4697,10 @@ function buildManagedSyncPayload(opts: {
     dry_run: opts.push.dry_run,
     persisted: opts.persisted,
     registry_path: opts.registryPath,
+    registry_store: {
+      kind: opts.registryStore.kind,
+      location: opts.registryStore.location,
+    },
     sync_run: opts.syncRun,
     aily: opts.push,
     base_mirror: {
@@ -5031,7 +5036,7 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     return;
   }
   if (sub !== 'sync') {
-    throw new Error(`Usage: ${brand()} feishu managed <sync|base-template|provision-base> [options]`);
+    throw new Error(`Usage: ${brand()} feishu managed <sync|base-template|provision-base|sql-schema> [options]`);
   }
 
   const rawArgs = args.slice(1);
@@ -5043,7 +5048,8 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
   const env = loadAilyEnv(rawArgs, root);
   const opts = parseManagedSync(rawArgs, env);
   const registryPath = opts.registryPath ?? defaultManagedRegistryPath(root);
-  const registry = loadManagedRegistry(registryPath);
+  const registryStore = createJsonManagedRegistryStore(registryPath);
+  const registry = await registryStore.load();
   const candidates = collectAilyPushCandidates(root, {
     limit: opts.limit,
     sourceUrlBase: opts.sourceUrlBase,
@@ -5134,7 +5140,7 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     finished_at: finishedAt,
     assets: assets.map(managedObservationFromAilyAsset),
   });
-  if (!opts.dryRun) saveManagedRegistry(registryPath, record.snapshot);
+  if (!opts.dryRun) await registryStore.save(record.snapshot);
   const baseRows = buildManagedBaseMirrorRows(record.snapshot);
   const baseWrite = mirrorManagedBaseRows({
     rows: baseRows,
@@ -5145,6 +5151,7 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
   });
   const payload = buildManagedSyncPayload({
     registryPath,
+    registryStore,
     persisted: !opts.dryRun,
     syncRun: record.sync_run,
     push: combinedPush,
@@ -5558,7 +5565,7 @@ COMMANDS
 
   managed sync [--path DIR] [--registry FILE] [--space-id knowledge_space_xxx] [--dry-run]
                [--base-token TOKEN --base-table-id TABLE]
-      Prototype a Feishu-native managed asset registry using local JSON state.
+      Prototype a Feishu-native managed asset registry using the default local JSON store.
       Creates/updates sources, assets, and sync_runs rows, then previews Base rows.
       Hash-matching assets are skipped locally; changed assets update Aily by title.
       When Base args are present, mirrors rows by Source URI via lark-cli record search/upsert.

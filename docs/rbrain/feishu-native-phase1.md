@@ -173,8 +173,8 @@ RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=... rbrain feishu managed sync --path ~/rb
 
 The local adapter:
 
-- represents `sources`, `assets`, and `sync_runs` in a JSON registry
-- stores the registry under `.rbrain-managed/registry.json`
+- represents `sources`, `assets`, and `sync_runs` behind a small registry store
+- uses a JSON store under `.rbrain-managed/registry.json` by default
 - ignores `.rbrain-managed/` in generated mirror Git repos
 - works without a local RBrain database when `--path` is provided
 - uses registry `content_sha256` to skip unchanged assets
@@ -188,9 +188,9 @@ The local adapter:
 - prints Postgres DDL for the managed registry with
   `rbrain feishu managed sql-schema`
 
-It is intentionally not the final managed backend. The next slice should replace
-or wrap the JSON registry with a Serverless PG / Miaoda storage adapter using
-the generated DDL.
+It is intentionally not the final managed backend. The sync path now talks to a
+registry store boundary, so the next slice should add a Serverless PG / Miaoda
+store implementation behind that boundary using the generated DDL.
 
 ## Acceptance Criteria
 

@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   FEISHU_MANAGED_SQL_SCHEMA_VERSION,
   MANAGED_BASE_FIELD_NAMES,
@@ -7,6 +10,7 @@ import {
   buildManagedRegistrySqlSchema,
   buildManagedBaseMirrorRows,
   createEmptyManagedRegistry,
+  createJsonManagedRegistryStore,
   recordManagedSyncResult,
 } from '../src/core/feishu-managed-registry.ts';
 
@@ -98,6 +102,41 @@ describe('Feishu managed registry', () => {
     expect(second.sync_run.assets_uploaded).toBe(0);
     expect(second.snapshot.assets).toHaveLength(1);
     expect(second.snapshot.sync_runs).toHaveLength(2);
+  });
+
+  test('JSON store round-trips managed registry snapshots', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rbrain-managed-registry-'));
+    try {
+      const path = join(dir, 'nested', 'registry.json');
+      const store = createJsonManagedRegistryStore(path);
+      const empty = await store.load();
+      const recorded = recordManagedSyncResult(empty, {
+        source: { id: 'feishu', kind: 'manual', name: 'Feishu' },
+        trigger: 'manual',
+        started_at: '2026-06-07T10:00:00.000Z',
+        finished_at: '2026-06-07T10:00:01.000Z',
+        assets: [{
+          source_uri: 'feishu/docs/roadmap.md',
+          title: 'feishu/docs/roadmap.md',
+          content_sha256: 'c'.repeat(64),
+          normalized_text_uri: 'feishu/docs/roadmap.md',
+          aily_asset_title: 'rbrain-feishu-roadmap.txt',
+          aily_asset_id: 'knowledge_asset_1',
+          aily_status: 'successful',
+          action: 'created',
+        }],
+      });
+
+      await store.save(recorded.snapshot);
+      const loaded = await store.load();
+
+      expect(store.kind).toBe('json');
+      expect(store.location).toBe(path);
+      expect(loaded.assets[0]!.source_uri).toBe('feishu/docs/roadmap.md');
+      expect(loaded.sync_runs[0]!.id).toBe(recorded.sync_run.id);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test('builds stable Base record fields for status mirroring', () => {

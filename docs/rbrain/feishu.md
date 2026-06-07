@@ -136,7 +136,7 @@ RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=... rbrain feishu managed sync --path ~/rb
 This command models the future managed control plane without requiring a local
 RBrain database when `--path` is provided. It reads Feishu mirror Markdown,
 computes `content_sha256`, creates or updates deterministic Aily knowledge
-assets, and writes a local registry at:
+assets, and writes through the default local JSON registry store at:
 
 ```text
 ~/rbrain-feishu/.rbrain-managed/registry.json
@@ -147,6 +147,10 @@ The registry contains the three managed tables from the Phase 1 design:
 `.rbrain-managed/`, because this is control-plane state rather than source
 knowledge. `managed sync` also returns a `base_mirror.preview` in JSON so the
 same rows can be inspected before writing to Feishu Base.
+
+The sync command reads and writes through a registry store boundary. The current
+store is JSON for local fixture and debugging runs; the same table contract is
+intended to back a later Serverless PG / Miaoda store.
 
 Idempotency is registry-driven: if a candidate's hash matches the existing
 asset row, upload is skipped locally; if the hash changes, the Aily asset is

@@ -89,6 +89,13 @@ export interface ManagedSyncRecordResult {
   assets: ManagedAssetRow[];
 }
 
+export interface ManagedRegistryStore {
+  readonly kind: string;
+  readonly location: string;
+  load(): Promise<ManagedRegistrySnapshot>;
+  save(snapshot: ManagedRegistrySnapshot): Promise<void>;
+}
+
 export interface ManagedBaseMirrorRow {
   source_id: string;
   source_uri: string;
@@ -145,6 +152,27 @@ export function loadManagedRegistry(path: string): ManagedRegistrySnapshot {
 export function saveManagedRegistry(path: string, snapshot: ManagedRegistrySnapshot): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(snapshot, null, 2) + '\n', 'utf-8');
+}
+
+export class JsonManagedRegistryStore implements ManagedRegistryStore {
+  readonly kind = 'json';
+  readonly location: string;
+
+  constructor(path: string) {
+    this.location = path;
+  }
+
+  async load(): Promise<ManagedRegistrySnapshot> {
+    return loadManagedRegistry(this.location);
+  }
+
+  async save(snapshot: ManagedRegistrySnapshot): Promise<void> {
+    saveManagedRegistry(this.location, snapshot);
+  }
+}
+
+export function createJsonManagedRegistryStore(path: string): ManagedRegistryStore {
+  return new JsonManagedRegistryStore(path);
 }
 
 export function cloneManagedRegistry(snapshot: ManagedRegistrySnapshot): ManagedRegistrySnapshot {

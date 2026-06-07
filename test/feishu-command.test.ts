@@ -470,12 +470,17 @@ describe('rbrain feishu command helpers', () => {
     const payload = JSON.parse(proc.stdout.toString()) as {
       persisted: boolean;
       registry_path: string;
+      registry_store: { kind: string; location: string };
       sync_run: { assets_seen: number; assets_changed: number; assets_uploaded: number };
       aily: { assets: Array<{ action: string; relative_path: string }> };
       base_mirror: { rows: number };
     };
     expect(payload.persisted).toBe(false);
     expect(payload.registry_path).toBe(join(root, '.rbrain-managed', 'registry.json'));
+    expect(payload.registry_store).toEqual({
+      kind: 'json',
+      location: payload.registry_path,
+    });
     expect(payload.sync_run.assets_seen).toBe(2);
     expect(payload.sync_run.assets_changed).toBe(2);
     expect(payload.sync_run.assets_uploaded).toBe(0);
