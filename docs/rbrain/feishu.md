@@ -245,6 +245,8 @@ The bundle writes:
 
 - `feishu-managed-trigger.ts` for HTTP/manual, scheduled sync, status, and
   refresh-status entrypoints
+- `feishu-managed-local-server.ts` for local Bun smoke tests before platform
+  deployment
 - `feishu-managed-registry.sql` for the managed Postgres tables
 - `package.json` for installing the runtime dependency that exports
   `gbrain/feishu-managed`
@@ -270,6 +272,16 @@ Aily token as required before real scheduled sync or `--no-dry-run`.
 secret-safe sequence for registry provisioning, trigger deployment, status-only
 canary, production canary with `--wait-status`, registry inspection, and the
 final Aily custom-agent answer check.
+
+Before uploading the trigger to a platform, the generated bundle can be run
+locally with Bun:
+
+```bash
+cd ./feishu-managed-deploy
+bun install
+bun run start
+rbrain feishu managed canary --url http://127.0.0.1:8787 --status-only --json
+```
 
 Before or after deployment, generate the exact probe bodies:
 
