@@ -326,6 +326,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('--registry-store json|postgres');
     expect(stdout).toContain('--registry-url POSTGRES_URL');
     expect(stdout).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
+    expect(stdout).toContain('managed status [--path DIR]');
     expect(stdout).toContain('managed base-template [--json]');
     expect(stdout).toContain('managed sql-schema [--json]');
     expect(stdout).toContain('managed provision-base --base-token TOKEN');
@@ -535,6 +536,68 @@ describe('rbrain feishu command helpers', () => {
     expect(handle.store.location).toBe(pgConfig.location);
     await handle.close?.();
     expect(closed).toBe(true);
+  });
+
+  test('managed status summarizes a local registry without Aily credentials', () => {
+    const root = makeTempDir('rbrain-feishu-managed-status-');
+    const candidates = collectAilyPushCandidates(root);
+    const seed = recordManagedSyncResult(createEmptyManagedRegistry('2026-06-07T10:00:00.000Z'), {
+      source: { id: 'feishu', kind: 'manual', name: 'Feishu' },
+      trigger: 'manual',
+      started_at: '2026-06-07T10:00:00.000Z',
+      finished_at: '2026-06-07T10:00:01.000Z',
+      assets: candidates.map((candidate, idx) => ({
+        source_uri: candidate.source_url,
+        title: candidate.relative_path,
+        content_sha256: candidate.content_sha256,
+        normalized_text_uri: candidate.relative_path,
+        aily_asset_title: candidate.title,
+        aily_asset_id: `knowledge_asset_${idx}`,
+        aily_status: idx === 0 ? 'successful' : 'learning',
+        action: 'created',
+      })),
+    });
+    saveManagedRegistry(defaultManagedRegistryPath(root), seed.snapshot);
+
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'status',
+        '--path',
+        root,
+        '--json',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      status: string;
+      registry_store: { kind: string; location: string };
+      counts: { sources: number; assets: number; sync_runs: number; base_mirror_rows: number };
+      latest_sync_run: { id: string; assets_seen: number };
+      aily_statuses: Record<string, number>;
+      base_mirror: { preview: unknown[] };
+    };
+
+    expect(payload.status).toBe('ok');
+    expect(payload.registry_store.kind).toBe('json');
+    expect(payload.registry_store.location).toBe(defaultManagedRegistryPath(root));
+    expect(payload.counts).toEqual({
+      sources: 1,
+      assets: 1,
+      sync_runs: 1,
+      base_mirror_rows: 1,
+    });
+    expect(payload.latest_sync_run.id).toBe(seed.sync_run.id);
+    expect(payload.latest_sync_run.assets_seen).toBe(1);
+    expect(payload.aily_statuses).toEqual({ successful: 1 });
+    expect(payload.base_mirror.preview).toHaveLength(1);
   });
 
   test('managed base-template prints the status table field contract', () => {

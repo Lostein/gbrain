@@ -192,6 +192,8 @@ The local adapter:
 - lets `managed sync` select that Postgres store with
   `--registry-store postgres`, `--registry-url`, or
   `RBRAIN_FEISHU_MANAGED_DATABASE_URL`
+- adds `rbrain feishu managed status` so JSON or Postgres registry state can be
+  inspected before a full Aily push
 
 It is intentionally not the final managed backend. The sync path now talks to a
 registry store boundary, and both the default JSON store and the Postgres store
@@ -220,9 +222,12 @@ Local tests:
 - secret redaction
 - Aily create/update/skip mocked responses
 - Base mirror mocked responses
+- managed status JSON output for registry counts and latest run
 
 Manual platform checks:
 
+- `rbrain feishu managed status --registry-store postgres --registry-ensure-schema`
+  can read the target Serverless PG registry.
 - Miaoda scheduled/manual trigger runs.
 - Serverless PG tables are created and queryable.
 - Aily Knowledge Space receives an asset and reaches `successful`.

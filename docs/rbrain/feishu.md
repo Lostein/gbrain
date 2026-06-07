@@ -166,6 +166,20 @@ RBRAIN_FEISHU_MANAGED_DATABASE_URL=postgresql://... \
 useful for the first run against a new Serverless PG database. The URL is
 redacted in command output.
 
+Before running a full sync, inspect the managed registry:
+
+```bash
+rbrain feishu managed status --path ~/rbrain-feishu --json
+rbrain feishu managed status \
+  --registry-store postgres \
+  --registry-url "$RBRAIN_FEISHU_MANAGED_DATABASE_URL" \
+  --registry-ensure-schema \
+  --json
+```
+
+The status command does not require an Aily token. It reports source/asset/run
+counts, the latest sync run, Aily status counts, and a Base mirror preview.
+
 Idempotency is registry-driven: if a candidate's hash matches the existing
 asset row, upload is skipped locally; if the hash changes, the Aily asset is
 updated by deterministic title. Secrets are not stored in the registry output.
