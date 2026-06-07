@@ -45,6 +45,7 @@ import {
   buildImMessageSearchScript,
   buildMailTriageMarkdown,
   buildMailTriageScript,
+  buildManagedEnvCheck,
   buildManagedDeployBundleFiles,
   buildManagedTriggerProbeRequest,
   buildMirrorReadme,
@@ -338,6 +339,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('managed base-template [--json]');
     expect(stdout).toContain('managed trigger-template [--json]');
     expect(stdout).toContain('managed deploy-bundle [--out DIR]');
+    expect(stdout).toContain('managed env-check [--target status|canary|sync]');
     expect(stdout).toContain('managed probe [--action status|sync]');
     expect(stdout).toContain('managed canary --url URL');
     expect(stdout).toContain('managed sql-schema [--json]');
@@ -864,6 +866,117 @@ describe('rbrain feishu command helpers', () => {
     expect(proc.exitCode).not.toBe(0);
     expect(proc.stderr.toString()).toContain('refuses to overwrite existing files');
     expect(readFileSync(join(outDir, 'README.md'), 'utf-8')).toBe('existing\n');
+  });
+
+  test('managed env check reports missing required runtime variables without leaking values', () => {
+    const result = buildManagedEnvCheck({
+      target: 'sync',
+      env: {
+        RBRAIN_FEISHU_MANAGED_DATABASE_URL: 'postgresql://user:secret-password@example.com:5432/rbrain',
+        RBRAIN_FEISHU_MIRROR_ROOT: '/tmp/rbrain-feishu',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_ID: 'knowledge_space_test',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN: 'secret-token',
+      },
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.checks.find((check) => check.id === 'serverless_pg')?.present).toEqual(['RBRAIN_FEISHU_MANAGED_DATABASE_URL']);
+    expect(JSON.stringify(result)).not.toContain('secret-password');
+    expect(JSON.stringify(result)).not.toContain('secret-token');
+    expect(JSON.stringify(result)).not.toContain('/tmp/rbrain-feishu');
+  });
+
+  test('managed env check distinguishes canary from real sync token requirements', () => {
+    const canary = buildManagedEnvCheck({
+      target: 'canary',
+      env: {
+        RBRAIN_FEISHU_MANAGED_DATABASE_URL: 'postgresql://host/db',
+        RBRAIN_FEISHU_MIRROR_ROOT: '/tmp/rbrain-feishu',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_ID: 'knowledge_space_test',
+      },
+    });
+    const sync = buildManagedEnvCheck({
+      target: 'sync',
+      env: {
+        RBRAIN_FEISHU_MANAGED_DATABASE_URL: 'postgresql://host/db',
+        RBRAIN_FEISHU_MIRROR_ROOT: '/tmp/rbrain-feishu',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_ID: 'knowledge_space_test',
+      },
+    });
+
+    expect(canary.status).toBe('warn');
+    expect(canary.checks.find((check) => check.id === 'aily_token')).toMatchObject({
+      status: 'warn',
+      required: false,
+    });
+    expect(sync.status).toBe('fail');
+    expect(sync.checks.find((check) => check.id === 'aily_token')).toMatchObject({
+      status: 'missing',
+      required: true,
+    });
+  });
+
+  test('managed env check warns when optional Base status mirror is incomplete', () => {
+    const result = buildManagedEnvCheck({
+      target: 'status',
+      env: {
+        RBRAIN_FEISHU_MANAGED_DATABASE_URL: 'postgresql://host/db',
+        RBRAIN_FEISHU_MANAGED_BASE_TOKEN: 'base-secret-token',
+      },
+    });
+
+    expect(result.status).toBe('warn');
+    expect(result.checks.find((check) => check.id === 'base_status_table')).toMatchObject({
+      status: 'warn',
+      required: false,
+      present: ['RBRAIN_FEISHU_MANAGED_BASE_TOKEN'],
+    });
+    expect(JSON.stringify(result)).not.toContain('base-secret-token');
+  });
+
+  test('managed env-check CLI reads env-file and returns JSON status', () => {
+    const root = makeTempDir('rbrain-feishu-env-check-');
+    const envFile = join(root, '.env');
+    writeFileSync(envFile, [
+      'RBRAIN_FEISHU_MANAGED_DATABASE_URL=postgresql://user:secret-password@example.com:5432/rbrain',
+      'RBRAIN_FEISHU_MIRROR_ROOT=/tmp/rbrain-feishu',
+      'RBRAIN_AILY_KNOWLEDGE_SPACE_ID=knowledge_space_test',
+      '',
+    ].join('\n'), 'utf-8');
+
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'env-check',
+        '--target',
+        'canary',
+        '--env-file',
+        envFile,
+        '--json',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: {
+        PATH: process.env.PATH ?? '',
+      },
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      status: string;
+      target: string;
+      checks: Array<{ id: string; status: string; present: string[] }>;
+    };
+
+    expect(payload.status).toBe('warn');
+    expect(payload.target).toBe('canary');
+    expect(payload.checks.find((check) => check.id === 'serverless_pg')?.status).toBe('ok');
+    expect(proc.stdout.toString()).not.toContain('secret-password');
+    expect(proc.stdout.toString()).not.toContain('/tmp/rbrain-feishu');
   });
 
   test('managed probe builds safe status and dry-run sync requests', () => {

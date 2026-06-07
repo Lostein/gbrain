@@ -206,6 +206,8 @@ The local adapter:
 - writes a complete starter bundle with `rbrain feishu managed deploy-bundle`,
   including the trigger wrapper, Postgres DDL, `.env.example`, and deployment
   README
+- checks runtime environment readiness with `rbrain feishu managed env-check`
+  without printing secret values
 - prints or POSTs status/sync trigger probes with `rbrain feishu managed probe`
   so real Miaoda deployments can be smoke-tested without hand-written JSON
 - runs `rbrain feishu managed canary` to execute status first and then dry-run
@@ -249,6 +251,8 @@ Local tests:
   entrypoints, and no embedded secrets
 - generated deployment bundle coverage for trigger, SQL, env example, README,
   and overwrite protection
+- managed env-check coverage for required variables, canary vs real sync token
+  requirements, optional Base mirror pairing, and no value leakage
 - managed probe coverage for status/sync request generation, dry-run default,
   HTTP POST wiring, and runtime env fallback
 - managed canary coverage for status-before-sync sequencing, dry-run default,
@@ -283,7 +287,8 @@ Manual platform checks:
    PG connection.
 4. Deploy the generated `managed deploy-bundle` output as a real
    manual/scheduled Miaoda trigger using the same registry store.
-5. Run `managed canary --url ...` or separate `managed probe` status/sync
+5. Run `managed env-check --target canary`, then `managed canary --url ...` or
+   separate `managed probe` status/sync
    checks.
 6. Verify Aily Knowledge Space reaches `successful` for a managed sync asset.
 7. Verify the Aily custom agent answers using the managed asset.
