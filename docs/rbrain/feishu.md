@@ -374,6 +374,37 @@ await runManagedTrigger({
 });
 ```
 
+For Feishu-native runtimes that already fetched and normalized one source item
+inside Miaoda/server functions, `sync` can accept inline assets without a mirror
+root when the registry store is Postgres:
+
+```ts
+await runManagedTrigger({
+  request: {
+    action: 'sync',
+    registry: {
+      store: 'postgres',
+      url: process.env.RBRAIN_FEISHU_MANAGED_DATABASE_URL,
+      ensureSchema: true,
+    },
+    aily: {
+      knowledgeSpaceId: process.env.RBRAIN_AILY_KNOWLEDGE_SPACE_ID,
+    },
+    assets: [{
+      sourceUri: 'https://feishu.example/doc/roadmap',
+      normalizedTextUri: 'feishu/docs/roadmap.md',
+      content: '# Roadmap\n\nNormalized source text.',
+    }],
+  },
+  env: process.env,
+});
+```
+
+Inline assets reuse the same Aily upload, hash-skip, registry, and Base mirror
+path as mirror-file sync. `sourceUri` becomes the registry source URI;
+`normalizedTextUri` controls the deterministic Aily asset title and normalized
+text URI.
+
 A Miaoda/server-function trigger can therefore share the same JSON/Postgres
 store behavior without spawning a local shell command.
 
