@@ -179,11 +179,13 @@ The local adapter:
 - works without a local RBrain database when `--path` is provided
 - uses registry `content_sha256` to skip unchanged assets
 - updates changed Aily assets by deterministic asset title
-- returns `base_mirror.preview` rows for the future Feishu Base status table
+- returns `base_mirror.preview` rows for the Feishu Base status table
+- optionally mirrors rows into a real Base table with `--base-token` and
+  `--base-table-id`
 
 It is intentionally not the final managed backend. The next slice should replace
-or wrap the JSON registry with Serverless PG / Miaoda storage and write the
-`base_mirror.preview` rows into a real Base table.
+or wrap the JSON registry with Serverless PG / Miaoda storage, then move the
+Base table setup into a Feishu-native provisioning flow.
 
 ## Acceptance Criteria
 
@@ -231,7 +233,7 @@ Manual platform checks:
 1. Confirm Miaoda platform access and runtime capabilities.
 2. Replace or wrap the local JSON registry with the target Serverless PG /
    Miaoda table layer.
-3. Write `base_mirror.preview` rows into a real Feishu Base table.
+3. Add a Base table provisioning helper or documented template.
 4. Add a real manual/scheduled Miaoda trigger.
 5. Verify Aily Knowledge Space reaches `successful` for a managed sync asset.
 6. Verify the Aily custom agent answers using the managed asset.

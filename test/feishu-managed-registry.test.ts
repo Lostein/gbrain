@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  MANAGED_BASE_FIELD_NAMES,
+  buildManagedBaseRecordFields,
+  buildManagedBaseTableFieldsJson,
   buildManagedBaseMirrorRows,
   createEmptyManagedRegistry,
   recordManagedSyncResult,
@@ -93,5 +96,26 @@ describe('Feishu managed registry', () => {
     expect(second.sync_run.assets_uploaded).toBe(0);
     expect(second.snapshot.assets).toHaveLength(1);
     expect(second.snapshot.sync_runs).toHaveLength(2);
+  });
+
+  test('builds stable Base record fields for status mirroring', () => {
+    const fields = buildManagedBaseRecordFields({
+      source_id: 'feishu',
+      source_uri: 'feishu/docs/roadmap.md',
+      title: 'feishu/docs/roadmap.md',
+      content_sha256: 'c'.repeat(64),
+      aily_asset_id: null,
+      aily_asset_title: 'rbrain-feishu-roadmap.txt',
+      aily_status: 'successful',
+      last_synced_at: '2026-06-07T10:00:00.000Z',
+    });
+
+    expect(fields[MANAGED_BASE_FIELD_NAMES.sourceUri]).toBe('feishu/docs/roadmap.md');
+    expect(fields[MANAGED_BASE_FIELD_NAMES.ailyAssetId]).toBe('');
+    expect(fields[MANAGED_BASE_FIELD_NAMES.ailyStatus]).toBe('successful');
+    expect(buildManagedBaseTableFieldsJson()).toContainEqual({
+      name: MANAGED_BASE_FIELD_NAMES.sourceUri,
+      type: 'text',
+    });
   });
 });

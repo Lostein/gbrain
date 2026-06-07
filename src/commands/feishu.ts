@@ -8,6 +8,8 @@ import type { BrainEngine } from '../core/engine.ts';
 import { assertValidSourceId } from '../core/source-id.ts';
 import { addSource as addBrainSource, SourceOpError } from '../core/sources-ops.ts';
 import {
+  MANAGED_BASE_FIELD_NAMES,
+  buildManagedBaseRecordFields,
   buildManagedBaseMirrorRows,
   cloneManagedRegistry,
   defaultManagedRegistryPath,
@@ -267,6 +269,9 @@ interface ManagedSyncOpts extends AilyPushSpaceOpts {
   trigger: string;
   sourceKind: ManagedSourceKind;
   sourceName: string;
+  baseToken?: string;
+  baseTableId?: string;
+  baseAs?: string;
 }
 
 interface FeishuContext {
@@ -728,6 +733,13 @@ function parseAilyPositionals(args: string[]): string[] {
     '--env-file',
     '--source-url-base',
     '--limit',
+    '--registry',
+    '--trigger',
+    '--source-kind',
+    '--name',
+    '--base-token',
+    '--base-table-id',
+    '--base-as',
   ]);
   const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
@@ -811,6 +823,9 @@ function parseManagedSync(
     trigger: parseFlagValue(args, '--trigger') ?? 'manual',
     sourceKind: parseManagedSourceKind(parseFlagValue(args, '--source-kind')),
     sourceName: parseFlagValue(args, '--name') ?? 'Feishu',
+    baseToken: parseFlagValue(args, '--base-token'),
+    baseTableId: parseFlagValue(args, '--base-table-id'),
+    baseAs: parseFlagValue(args, '--base-as'),
   };
 }
 
@@ -4653,6 +4668,7 @@ function buildManagedSyncPayload(opts: {
   syncRun: ManagedSyncRunRow;
   push: AilyPushSpaceResult;
   baseRows: ManagedBaseMirrorRow[];
+  baseWrite: ManagedBaseMirrorWriteResult;
 }) {
   return {
     status: opts.push.status,
@@ -4662,7 +4678,14 @@ function buildManagedSyncPayload(opts: {
     sync_run: opts.syncRun,
     aily: opts.push,
     base_mirror: {
+      status: opts.baseWrite.status,
+      configured: opts.baseWrite.configured,
+      dry_run: opts.baseWrite.dry_run,
       rows: opts.baseRows.length,
+      created: opts.baseWrite.created,
+      updated: opts.baseWrite.updated,
+      failed: opts.baseWrite.failed,
+      errors: opts.baseWrite.errors,
       preview: opts.baseRows.slice(0, 20),
     },
   };
@@ -4680,8 +4703,153 @@ function printManagedSyncResult(payload: ReturnType<typeof buildManagedSyncPaylo
     `  Aily: ${payload.aily.created} created, ${payload.aily.updated} updated, ` +
     `${payload.aily.skipped} skipped, ${payload.aily.failed} failed`,
   );
-  console.log(`  Base mirror rows: ${payload.base_mirror.rows}`);
+  console.log(
+    `  Base mirror: ${payload.base_mirror.status}, ${payload.base_mirror.rows} rows, ` +
+    `${payload.base_mirror.created} created, ${payload.base_mirror.updated} updated, ` +
+    `${payload.base_mirror.failed} failed`,
+  );
   if (payload.sync_run.error_summary) console.log(`  errors: ${payload.sync_run.error_summary}`);
+}
+
+interface ManagedBaseMirrorWriteResult {
+  status: 'preview' | 'ok' | 'partial';
+  configured: boolean;
+  dry_run: boolean;
+  created: number;
+  updated: number;
+  failed: number;
+  errors: string[];
+}
+
+function withOptionalFlag(args: string[], name: string, value: string | undefined): string[] {
+  return value ? [...args, name, value] : args;
+}
+
+function redactCommandError(input: string, secrets: string[]): string {
+  let out = input;
+  for (const secret of secrets) {
+    if (secret) out = out.split(secret).join('<redacted>');
+  }
+  return out.slice(0, 500);
+}
+
+function extractBaseRecordIdFromSearch(input: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input);
+  } catch {
+    return null;
+  }
+
+  const visit = (value: unknown): string | null => {
+    if (!value || typeof value !== 'object') return null;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = visit(item);
+        if (found) return found;
+      }
+      return null;
+    }
+    const obj = value as Record<string, unknown>;
+    for (const key of ['record_id', 'recordId', 'id']) {
+      const candidate = obj[key];
+      if (typeof candidate === 'string' && /^rec[a-zA-Z0-9_]+/.test(candidate)) return candidate;
+    }
+    for (const child of Object.values(obj)) {
+      const found = visit(child);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  return visit(parsed);
+}
+
+function mirrorManagedBaseRows(opts: {
+  rows: ManagedBaseMirrorRow[];
+  baseToken?: string;
+  tableId?: string;
+  as?: string;
+  dryRun: boolean;
+  commandImpl?: typeof runLocalCommand;
+}): ManagedBaseMirrorWriteResult {
+  const configured = Boolean(opts.baseToken && opts.tableId);
+  if (!configured || opts.dryRun) {
+    return {
+      status: configured ? 'ok' : 'preview',
+      configured,
+      dry_run: opts.dryRun,
+      created: 0,
+      updated: 0,
+      failed: 0,
+      errors: [],
+    };
+  }
+
+  const commandImpl = opts.commandImpl ?? runLocalCommand;
+  let created = 0;
+  let updated = 0;
+  let failed = 0;
+  const errors: string[] = [];
+  const baseArgs = ['lark-cli', 'base'];
+  for (const row of opts.rows) {
+    const searchArgs = withOptionalFlag([
+      ...baseArgs,
+      '+record-search',
+      '--base-token',
+      opts.baseToken!,
+      '--table-id',
+      opts.tableId!,
+      '--keyword',
+      row.source_uri,
+      '--search-field',
+      MANAGED_BASE_FIELD_NAMES.sourceUri,
+      '--field-id',
+      MANAGED_BASE_FIELD_NAMES.sourceUri,
+      '--limit',
+      '1',
+      '--format',
+      'json',
+    ], '--as', opts.as);
+    const search = commandImpl(searchArgs);
+    if (!search.ok) {
+      failed++;
+      errors.push(`${row.source_uri}: search failed: ${redactCommandError(search.stderr || search.stdout, [opts.baseToken!])}`);
+      continue;
+    }
+
+    const recordId = extractBaseRecordIdFromSearch(search.stdout);
+    const fields = buildManagedBaseRecordFields(row);
+    let upsertArgs = withOptionalFlag([
+      ...baseArgs,
+      '+record-upsert',
+      '--base-token',
+      opts.baseToken!,
+      '--table-id',
+      opts.tableId!,
+      '--json',
+      JSON.stringify(fields),
+    ], '--as', opts.as);
+    upsertArgs = withOptionalFlag(upsertArgs, '--record-id', recordId ?? undefined);
+    const upsert = commandImpl(upsertArgs);
+    if (!upsert.ok) {
+      failed++;
+      errors.push(`${row.source_uri}: upsert failed: ${redactCommandError(upsert.stderr || upsert.stdout, [opts.baseToken!])}`);
+      continue;
+    }
+    if (recordId) updated++;
+    else created++;
+  }
+
+  return {
+    status: failed > 0 ? 'partial' : 'ok',
+    configured,
+    dry_run: false,
+    created,
+    updated,
+    failed,
+    errors,
+  };
 }
 
 async function runManaged(engine: BrainEngine | undefined, args: string[]): Promise<void> {
@@ -4796,12 +4964,20 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
   });
   if (!opts.dryRun) saveManagedRegistry(registryPath, record.snapshot);
   const baseRows = buildManagedBaseMirrorRows(record.snapshot);
+  const baseWrite = mirrorManagedBaseRows({
+    rows: baseRows,
+    baseToken: opts.baseToken,
+    tableId: opts.baseTableId,
+    as: opts.baseAs,
+    dryRun: opts.dryRun,
+  });
   const payload = buildManagedSyncPayload({
     registryPath,
     persisted: !opts.dryRun,
     syncRun: record.sync_run,
     push: combinedPush,
     baseRows,
+    baseWrite,
   });
 
   if (opts.json) {
@@ -4810,7 +4986,7 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     printManagedSyncResult(payload);
     if (!opts.dryRun && pushCandidates.length > 0) console.log(`  token source: ${token.source}`);
   }
-  if (combinedPush.failed > 0) process.exitCode = 1;
+  if (combinedPush.failed > 0 || baseWrite.failed > 0) process.exitCode = 1;
 }
 
 function printStatusResult(payload: {
@@ -5209,9 +5385,11 @@ COMMANDS
       Existing API-created assets are skipped unless --replace is passed.
 
   managed sync [--path DIR] [--registry FILE] [--space-id knowledge_space_xxx] [--dry-run]
+               [--base-token TOKEN --base-table-id TABLE]
       Prototype a Feishu-native managed asset registry using local JSON state.
       Creates/updates sources, assets, and sync_runs rows, then previews Base rows.
       Hash-matching assets are skipped locally; changed assets update Aily by title.
+      When Base args are present, mirrors rows by Source URI via lark-cli record search/upsert.
 
 EXAMPLES
   ${brand()} feishu init

@@ -99,6 +99,20 @@ export interface ManagedBaseMirrorRow {
   last_synced_at: string | null;
 }
 
+export const MANAGED_BASE_FIELD_NAMES = {
+  sourceId: 'Source ID',
+  sourceUri: 'Source URI',
+  title: 'Title',
+  contentSha256: 'Content SHA256',
+  ailyAssetId: 'Aily Asset ID',
+  ailyAssetTitle: 'Aily Asset Title',
+  ailyStatus: 'Aily Status',
+  lastSyncedAt: 'Last Synced At',
+} as const;
+
+export type ManagedBaseFieldName = typeof MANAGED_BASE_FIELD_NAMES[keyof typeof MANAGED_BASE_FIELD_NAMES];
+export type ManagedBaseRecordFields = Record<ManagedBaseFieldName, string>;
+
 const SECRET_KEY_PATTERN = /(token|secret|password|api[_-]?key|authorization)/i;
 
 export function defaultManagedRegistryPath(root: string): string {
@@ -252,4 +266,21 @@ export function buildManagedBaseMirrorRows(snapshot: ManagedRegistrySnapshot): M
       aily_status: asset.aily_status,
       last_synced_at: asset.last_synced_at,
     }));
+}
+
+export function buildManagedBaseRecordFields(row: ManagedBaseMirrorRow): ManagedBaseRecordFields {
+  return {
+    [MANAGED_BASE_FIELD_NAMES.sourceId]: row.source_id,
+    [MANAGED_BASE_FIELD_NAMES.sourceUri]: row.source_uri,
+    [MANAGED_BASE_FIELD_NAMES.title]: row.title,
+    [MANAGED_BASE_FIELD_NAMES.contentSha256]: row.content_sha256,
+    [MANAGED_BASE_FIELD_NAMES.ailyAssetId]: row.aily_asset_id ?? '',
+    [MANAGED_BASE_FIELD_NAMES.ailyAssetTitle]: row.aily_asset_title,
+    [MANAGED_BASE_FIELD_NAMES.ailyStatus]: row.aily_status ?? '',
+    [MANAGED_BASE_FIELD_NAMES.lastSyncedAt]: row.last_synced_at ?? '',
+  };
+}
+
+export function buildManagedBaseTableFieldsJson(): Array<{ name: ManagedBaseFieldName; type: 'text' }> {
+  return Object.values(MANAGED_BASE_FIELD_NAMES).map((name) => ({ name, type: 'text' as const }));
 }

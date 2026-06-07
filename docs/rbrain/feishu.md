@@ -146,11 +146,35 @@ The registry contains the three managed tables from the Phase 1 design:
 `sources`, `assets`, and `sync_runs`. The generated mirror `.gitignore` ignores
 `.rbrain-managed/`, because this is control-plane state rather than source
 knowledge. `managed sync` also returns a `base_mirror.preview` in JSON so the
-same rows can be written to a Feishu Base table in the next slice.
+same rows can be inspected before writing to Feishu Base.
 
 Idempotency is registry-driven: if a candidate's hash matches the existing
 asset row, upload is skipped locally; if the hash changes, the Aily asset is
 updated by deterministic title. Secrets are not stored in the registry output.
+
+To mirror status into a real Feishu Base table, create a table with these text
+fields:
+
+- `Source ID`
+- `Source URI`
+- `Title`
+- `Content SHA256`
+- `Aily Asset ID`
+- `Aily Asset Title`
+- `Aily Status`
+- `Last Synced At`
+
+Then pass the Base identifiers:
+
+```bash
+rbrain feishu managed sync --path ~/rbrain-feishu \
+  --base-token appxxx \
+  --base-table-id tblxxx
+```
+
+The command searches the table by `Source URI`. If a matching record exists, it
+updates that record; otherwise it creates one. The Base token is never printed
+in JSON output.
 
 For the proposed Feishu-native managed architecture, where Aily Knowledge Space
 is the runtime knowledge backend, Miaoda hosts the online control plane, and

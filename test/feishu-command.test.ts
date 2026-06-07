@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import matter from 'gray-matter';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withEnv } from './helpers/with-env.ts';
+import { defaultManagedRegistryPath, recordManagedSyncResult, saveManagedRegistry, createEmptyManagedRegistry } from '../src/core/feishu-managed-registry.ts';
 import {
   FEISHU_DOCTOR_CAPABILITY_CHECKS,
   FEISHU_MIRROR_DIRS,
@@ -479,6 +480,94 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.aily.assets[0]!.relative_path).toBe('feishu/rbrain-feishu-overview.md');
     expect(payload.base_mirror.rows).toBe(2);
     expect(existsSync(payload.registry_path)).toBe(false);
+  });
+
+  test('managed sync mirrors registry rows into Base by Source URI', () => {
+    const root = makeTempDir('rbrain-feishu-managed-base-');
+    const fakeBin = makeTempDir('rbrain-feishu-managed-base-bin-');
+    const logFile = join(fakeBin, 'calls.log');
+    const dir = join(root, 'feishu', 'docs');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'roadmap.md'), '# Roadmap\n\nPlanning notes.\n', 'utf-8');
+
+    const candidates = collectAilyPushCandidates(root);
+    const seed = recordManagedSyncResult(createEmptyManagedRegistry('2026-06-07T10:00:00.000Z'), {
+      source: { id: 'feishu', kind: 'manual', name: 'Feishu' },
+      trigger: 'seed',
+      started_at: '2026-06-07T10:00:00.000Z',
+      finished_at: '2026-06-07T10:00:01.000Z',
+      assets: candidates.map((candidate, idx) => ({
+        source_uri: candidate.source_url,
+        title: candidate.relative_path,
+        content_sha256: candidate.content_sha256,
+        normalized_text_uri: candidate.relative_path,
+        aily_asset_title: candidate.title,
+        aily_asset_id: `knowledge_asset_${idx}`,
+        aily_status: 'successful',
+        action: 'created',
+      })),
+    });
+    saveManagedRegistry(defaultManagedRegistryPath(root), seed.snapshot);
+
+    const fakeLark = `#!/usr/bin/env bash
+set -euo pipefail
+printf '%q ' "$@" >> "${logFile}"
+printf '\\n' >> "${logFile}"
+if [ "\${2:-}" = "+record-search" ]; then
+  if printf '%s\\n' "$*" | grep -q 'rbrain-feishu-overview'; then
+    echo '{"data":{"items":[{"record_id":"rec_existing"}]}}'
+  else
+    echo '{"data":{"items":[]}}'
+  fi
+  exit 0
+fi
+if [ "\${2:-}" = "+record-upsert" ]; then
+  echo '{"ok":true}'
+  exit 0
+fi
+echo '{"ok":true}'
+`;
+    writeFileSync(join(fakeBin, 'lark-cli'), fakeLark, { encoding: 'utf-8', mode: 0o755 });
+
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'sync',
+        '--path',
+        root,
+        '--space-id',
+        'knowledge_space_test',
+        '--base-token',
+        'base-secret-token',
+        '--base-table-id',
+        'tbl_test',
+        '--json',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+      },
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    expect(proc.stdout.toString()).not.toContain('base-secret-token');
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      base_mirror: { configured: boolean; created: number; updated: number; failed: number };
+    };
+    expect(payload.base_mirror.configured).toBe(true);
+    expect(payload.base_mirror.created).toBe(1);
+    expect(payload.base_mirror.updated).toBe(1);
+    expect(payload.base_mirror.failed).toBe(0);
+    const log = readFileSync(logFile, 'utf-8');
+    expect(log).toContain('+record-search');
+    expect(log).toContain('+record-upsert');
+    expect(log).toContain('--record-id rec_existing');
   });
 
   test('expandPath resolves tilde paths', () => {
