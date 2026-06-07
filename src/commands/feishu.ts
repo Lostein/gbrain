@@ -58,6 +58,7 @@ const AILY_FALLBACK_SPACE_ID_ENV = 'AILY_KNOWLEDGE_SPACE_ID';
 const MANAGED_REGISTRY_STORE_ENV = 'RBRAIN_FEISHU_MANAGED_REGISTRY_STORE';
 const MANAGED_REGISTRY_DATABASE_URL_ENV = 'RBRAIN_FEISHU_MANAGED_DATABASE_URL';
 const MANAGED_TRIGGER_TEMPLATE_IMPORT = 'gbrain/feishu-managed';
+const MANAGED_DEPLOY_PACKAGE_DEPENDENCY = 'github:Lostein/gbrain';
 const MANAGED_DEPLOY_BUNDLE_DEFAULT_DIR = './feishu-managed-deploy';
 const MANAGED_MIRROR_ROOT_ENV = 'RBRAIN_FEISHU_MIRROR_ROOT';
 const MANAGED_BASE_TOKEN_ENV = 'RBRAIN_FEISHU_MANAGED_BASE_TOKEN';
@@ -6014,6 +6015,7 @@ interface ManagedTriggerTemplateCliOpts extends ManagedTriggerTemplateOpts {
 
 interface ManagedDeployBundleCliOpts extends ManagedTriggerTemplateOpts {
   outDir: string;
+  packageDependency: string;
   force: boolean;
   json: boolean;
 }
@@ -6029,6 +6031,10 @@ interface ManagedDeployPlanCliOpts {
 interface ManagedDeployBundleFileSpec {
   path: string;
   content: string;
+}
+
+interface ManagedDeployBundleOpts extends ManagedTriggerTemplateOpts {
+  packageDependency?: string;
 }
 
 export interface ManagedTriggerProbeOpts {
@@ -6444,12 +6450,54 @@ function parseManagedDeployBundle(args: string[]): ManagedDeployBundleCliOpts {
   if (!importSpecifier.trim()) {
     throw new Error(`${brand()} feishu managed deploy-bundle --import cannot be empty.`);
   }
+  const packageDependency = parseFlagValue(args, '--dependency') ?? MANAGED_DEPLOY_PACKAGE_DEPENDENCY;
+  assertManagedDeployPackageDependency(packageDependency);
   return {
     outDir: expandPath(parseFlagValue(args, '--out') ?? parseFlagValue(args, '--dir') ?? MANAGED_DEPLOY_BUNDLE_DEFAULT_DIR),
     importSpecifier,
+    packageDependency,
     force: args.includes('--force'),
     json: args.includes('--json'),
   };
+}
+
+function assertManagedDeployPackageDependency(packageDependency: string): void {
+  if (!packageDependency.trim()) {
+    throw new Error(`${brand()} feishu managed deploy-bundle --dependency cannot be empty.`);
+  }
+  const normalized = packageDependency.replace(/^git\+/i, '');
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.username || parsed.password || /\/\/[^/\s]+@/.test(normalized)) {
+      throw new Error('credentials');
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message === 'credentials') {
+      throw new Error(`${brand()} feishu managed deploy-bundle --dependency must not include credentials or tokens.`);
+    }
+  }
+}
+
+function managedPackageNameFromImportSpecifier(importSpecifier: string): string {
+  const parts = importSpecifier.split('/').filter(Boolean);
+  if (parts.length === 0) return 'gbrain';
+  if (parts[0]!.startsWith('@')) return parts.length > 1 ? `${parts[0]}/${parts[1]}` : parts[0]!;
+  return parts[0]!;
+}
+
+function buildManagedDeployPackageJson(opts: ManagedDeployBundleOpts = {}): string {
+  const importSpecifier = opts.importSpecifier ?? MANAGED_TRIGGER_TEMPLATE_IMPORT;
+  const packageDependency = opts.packageDependency ?? MANAGED_DEPLOY_PACKAGE_DEPENDENCY;
+  assertManagedDeployPackageDependency(packageDependency);
+  const packageName = managedPackageNameFromImportSpecifier(importSpecifier);
+  return `${JSON.stringify({
+    name: 'rbrain-feishu-managed-runtime',
+    private: true,
+    type: 'module',
+    dependencies: {
+      [packageName]: packageDependency,
+    },
+  }, null, 2)}\n`;
 }
 
 function buildManagedDeployEnvExample(): string {
@@ -6480,12 +6528,15 @@ Miaoda or another TypeScript server-function runtime.
   It imports \`handleManagedTriggerRequest\` from \`${opts.importSpecifier}\`.
 - \`feishu-managed-registry.sql\`: Postgres DDL for managed sources, assets,
   and sync runs.
+- \`package.json\`: runtime dependency manifest that installs the package
+  exporting \`${opts.importSpecifier}\`.
 - \`.env.example\`: required environment variable names. Put real values in
   the platform secret manager, not in this file.
 
 ## Deploy
 
-1. Install this package in the runtime so \`${opts.importSpecifier}\` resolves.
+1. Install dependencies from \`package.json\` in the runtime so
+   \`${opts.importSpecifier}\` resolves.
 2. Apply \`feishu-managed-registry.sql\` to the target Serverless PG database,
    or run:
 
@@ -6540,7 +6591,7 @@ database URLs and known token env values before returning the response body.
 `;
 }
 
-export function buildManagedDeployBundleFiles(opts: ManagedTriggerTemplateOpts = {}): ManagedDeployBundleFileSpec[] {
+export function buildManagedDeployBundleFiles(opts: ManagedDeployBundleOpts = {}): ManagedDeployBundleFileSpec[] {
   const importSpecifier = opts.importSpecifier ?? MANAGED_TRIGGER_TEMPLATE_IMPORT;
   return [
     {
@@ -6550,6 +6601,13 @@ export function buildManagedDeployBundleFiles(opts: ManagedTriggerTemplateOpts =
     {
       path: 'feishu-managed-registry.sql',
       content: `${buildManagedRegistrySqlSchema()}\n`,
+    },
+    {
+      path: 'package.json',
+      content: buildManagedDeployPackageJson({
+        importSpecifier,
+        packageDependency: opts.packageDependency,
+      }),
     },
     {
       path: '.env.example',
@@ -6563,7 +6621,10 @@ export function buildManagedDeployBundleFiles(opts: ManagedTriggerTemplateOpts =
 }
 
 function writeManagedDeployBundle(opts: ManagedDeployBundleCliOpts) {
-  const files = buildManagedDeployBundleFiles({ importSpecifier: opts.importSpecifier });
+  const files = buildManagedDeployBundleFiles({
+    importSpecifier: opts.importSpecifier,
+    packageDependency: opts.packageDependency,
+  });
   mkdirSync(opts.outDir, { recursive: true });
   const conflicts = files
     .map((file) => join(opts.outDir, file.path))
@@ -6585,6 +6646,7 @@ function writeManagedDeployBundle(opts: ManagedDeployBundleCliOpts) {
     status: 'ok',
     out_dir: opts.outDir,
     import_specifier: opts.importSpecifier,
+    package_dependency: opts.packageDependency,
     files: files.map((file) => ({
       path: file.path,
       bytes: Buffer.byteLength(file.content, 'utf-8'),
@@ -6601,6 +6663,7 @@ function printManagedDeployBundleResult(payload: ReturnType<typeof writeManagedD
   console.log(`Feishu managed deploy bundle: ${payload.status}`);
   console.log(`  out: ${payload.out_dir}`);
   console.log(`  import: ${payload.import_specifier}`);
+  console.log(`  dependency: ${payload.package_dependency}`);
   console.log(`  files:`);
   for (const file of payload.files) console.log(`  - ${file.path} (${file.bytes} bytes)`);
   console.log(`  env:`);
@@ -7933,8 +7996,8 @@ COMMANDS
   managed trigger-template [--json] [--import SPECIFIER]
       Print a TypeScript HTTP/scheduled trigger wrapper for managed sync/status.
 
-  managed deploy-bundle [--out DIR] [--import SPECIFIER] [--force] [--json]
-      Write trigger, Postgres DDL, env example, and README files for deployment.
+  managed deploy-bundle [--out DIR] [--import SPECIFIER] [--dependency SPEC] [--force] [--json]
+      Write trigger, package.json, Postgres DDL, env example, and README files for deployment.
 
   managed deploy-plan [--url URL] [--env-file FILE] [--target-status successful] [--json]
       Print an ordered, secret-safe deployment and verification plan.
@@ -7988,7 +8051,7 @@ EXAMPLES
   ${brand()} feishu aily push-space --space-id knowledge_space_xxx --dry-run
   ${brand()} feishu managed base-template --json
   ${brand()} feishu managed trigger-template > feishu-managed-trigger.ts
-  ${brand()} feishu managed deploy-bundle --out ./feishu-managed-deploy --json
+  ${brand()} feishu managed deploy-bundle --out ./feishu-managed-deploy --dependency github:Lostein/gbrain --json
   ${brand()} feishu managed deploy-plan --url https://example.com/trigger --json
   ${brand()} feishu managed env-check --target canary --env-file ./feishu-managed-deploy/.env.example --json
   ${brand()} feishu managed probe --action status --json

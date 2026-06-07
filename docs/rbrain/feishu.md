@@ -246,6 +246,8 @@ The bundle writes:
 - `feishu-managed-trigger.ts` for HTTP/manual, scheduled sync, status, and
   refresh-status entrypoints
 - `feishu-managed-registry.sql` for the managed Postgres tables
+- `package.json` for installing the runtime dependency that exports
+  `gbrain/feishu-managed`
 - `.env.example` with required environment variable names
 - `README.md` with deployment and smoke-test steps
 

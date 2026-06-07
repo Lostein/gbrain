@@ -854,9 +854,18 @@ describe('rbrain feishu command helpers', () => {
       'README.md',
       'feishu-managed-registry.sql',
       'feishu-managed-trigger.ts',
+      'package.json',
     ]);
     expect(byPath.get('feishu-managed-trigger.ts')).toContain('from "gbrain/feishu-managed"');
     expect(byPath.get('feishu-managed-registry.sql')).toContain('feishu_managed_assets');
+    expect(JSON.parse(byPath.get('package.json') ?? '{}')).toMatchObject({
+      name: 'rbrain-feishu-managed-runtime',
+      private: true,
+      type: 'module',
+      dependencies: {
+        gbrain: 'github:Lostein/gbrain',
+      },
+    });
     expect(byPath.get('.env.example')).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL=');
     expect(byPath.get('.env.example')).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=');
     expect(byPath.get('README.md')).toContain('status probe');
@@ -864,6 +873,28 @@ describe('rbrain feishu command helpers', () => {
     expect(byPath.get('README.md')).toContain('managed canary');
     expect(JSON.stringify(files)).not.toContain('secret-token');
     expect(JSON.stringify(files)).not.toContain('postgresql://user:secret-password');
+  });
+
+  test('managed deploy bundle can point package.json at a custom runtime package', () => {
+    const files = buildManagedDeployBundleFiles({
+      importSpecifier: '@example/rbrain-runtime/feishu-managed',
+      packageDependency: 'npm:@example/rbrain-runtime@1.2.3',
+    });
+    const byPath = new Map(files.map((file) => [file.path, file.content]));
+    const manifest = JSON.parse(byPath.get('package.json') ?? '{}') as {
+      dependencies?: Record<string, string>;
+    };
+
+    expect(byPath.get('feishu-managed-trigger.ts')).toContain('from "@example/rbrain-runtime/feishu-managed"');
+    expect(manifest.dependencies).toEqual({
+      '@example/rbrain-runtime': 'npm:@example/rbrain-runtime@1.2.3',
+    });
+  });
+
+  test('managed deploy bundle rejects credential-bearing package dependencies', () => {
+    expect(() => buildManagedDeployBundleFiles({
+      packageDependency: 'git+https://token-secret@github.com/Lostein/gbrain.git',
+    })).toThrow('--dependency must not include credentials or tokens');
   });
 
   test('managed deploy-bundle writes deployable files and reports them as JSON', () => {
@@ -892,6 +923,7 @@ describe('rbrain feishu command helpers', () => {
       status: string;
       out_dir: string;
       import_specifier: string;
+      package_dependency: string;
       files: Array<{ path: string; bytes: number }>;
       env: string[];
     };
@@ -899,16 +931,19 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.status).toBe('ok');
     expect(payload.out_dir).toBe(outDir);
     expect(payload.import_specifier).toBe('gbrain/feishu-managed');
+    expect(payload.package_dependency).toBe('github:Lostein/gbrain');
     expect(payload.files.map((file) => file.path).sort()).toEqual([
       '.env.example',
       'README.md',
       'feishu-managed-registry.sql',
       'feishu-managed-trigger.ts',
+      'package.json',
     ]);
     expect(payload.env).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
     expect(existsSync(join(outDir, 'feishu-managed-trigger.ts'))).toBe(true);
     expect(readFileSync(join(outDir, 'feishu-managed-trigger.ts'), 'utf-8')).toContain('handleManagedTriggerRequest');
     expect(readFileSync(join(outDir, 'feishu-managed-registry.sql'), 'utf-8')).toContain('feishu_managed_sync_runs');
+    expect(readFileSync(join(outDir, 'package.json'), 'utf-8')).toContain('github:Lostein/gbrain');
     expect(readFileSync(join(outDir, '.env.example'), 'utf-8')).not.toContain('postgresql://');
     expect(JSON.stringify(payload)).not.toContain('secret-token');
   });

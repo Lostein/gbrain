@@ -209,8 +209,8 @@ The local adapter:
   `rbrain feishu managed trigger-template`, importing the public
   `gbrain/feishu-managed` adapter and naming only environment variables
 - writes a complete starter bundle with `rbrain feishu managed deploy-bundle`,
-  including the trigger wrapper, Postgres DDL, `.env.example`, and deployment
-  README
+  including the trigger wrapper, runtime `package.json`, Postgres DDL,
+  `.env.example`, and deployment README
 - checks runtime environment readiness with `rbrain feishu managed env-check`
   without printing secret values
 - prints a secret-safe, ordered online rollout checklist with
@@ -268,8 +268,8 @@ Local tests:
   redaction
 - generated trigger template coverage for public import path,
   scheduled/status/refresh-status entrypoints, and no embedded secrets
-- generated deployment bundle coverage for trigger, SQL, env example, README,
-  and overwrite protection
+- generated deployment bundle coverage for trigger, package manifest, SQL, env
+  example, README, and overwrite protection
 - managed env-check coverage for required variables, canary refresh-status
   token requirements, optional Base mirror pairing, and no value leakage
 - managed deploy-plan coverage for ordered rollout commands, missing config
