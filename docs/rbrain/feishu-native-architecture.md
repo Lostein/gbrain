@@ -482,12 +482,15 @@ The current local implementation should inform the online version:
 
 ## Recommended Next PRs
 
-1. Add this architecture doc and link it from `docs/rbrain/feishu.md`.
-2. Use [`feishu-native-phase1.md`](./feishu-native-phase1.md) as the Phase 1
-   managed asset registry checklist.
-3. Add a `rbrain feishu managed push` design stub for local-to-Miaoda bridge.
-4. Prototype the Miaoda schema and sync endpoint outside the core CLI.
-5. Backport useful discoveries into `rbrain feishu aily push-space`.
+1. Deploy the generated `rbrain feishu managed deploy-bundle` output against
+   the target Miaoda / Serverless PG environment.
+2. Run the managed status probe, then a limited sync, and verify Postgres rows,
+   Aily asset state, and Base status rows.
+3. Backport any runtime-specific adjustments into the generated trigger bundle
+   or `gbrain/feishu-managed` adapter.
+4. Add the local-to-managed API bridge only after the online control plane has
+   a stable endpoint shape.
+5. Start eval and graph-cache tables once the managed sync path is stable.
 
 ## Decision Summary
 

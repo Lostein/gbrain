@@ -187,6 +187,23 @@ rbrain feishu managed trigger-template > feishu-managed-trigger.ts
 rbrain feishu managed trigger-template --json
 ```
 
+For a complete deployment starter, generate the bundle instead:
+
+```bash
+rbrain feishu managed deploy-bundle --out ./feishu-managed-deploy
+```
+
+The bundle writes:
+
+- `feishu-managed-trigger.ts` for HTTP/manual, scheduled sync, and status
+  entrypoints
+- `feishu-managed-registry.sql` for the managed Postgres tables
+- `.env.example` with required environment variable names
+- `README.md` with deployment and smoke-test steps
+
+By default the command refuses to overwrite existing files. Pass `--force` only
+when replacing a generated bundle intentionally.
+
 The generated template imports `handleManagedTriggerRequest` from
 `gbrain/feishu-managed`, exposes HTTP `handler`, `scheduled`, and `status`
 functions, and only names environment variables. It does not embed tokens or
