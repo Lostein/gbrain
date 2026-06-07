@@ -17,6 +17,7 @@ import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import {
+  BUNDLED_SCHEMA_PACK_NAMES,
   parseSchemaPackManifest,
   parseYamlMini,
   AGGREGATOR_KINDS,
@@ -55,13 +56,9 @@ describe('v0.41 T4: all 4 bundled lens packs parse cleanly', () => {
 });
 
 describe('v0.41 T4: bundled registry includes lens packs', () => {
-  test('load-active.ts BUNDLED array source includes the 4 lens pack names', () => {
-    const loadActiveSrc = readFileSync(
-      join(here, '..', 'src', 'core', 'schema-pack', 'load-active.ts'),
-      'utf-8',
-    );
+  test('bundled registry includes the 4 lens pack names', () => {
     for (const name of PACK_NAMES) {
-      expect(loadActiveSrc).toContain(`'${name}'`);
+      expect(BUNDLED_SCHEMA_PACK_NAMES).toContain(name);
     }
   });
 });

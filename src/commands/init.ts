@@ -1457,6 +1457,8 @@ export function reportModStatus(): void {
 }
 
 function printInitHelp() {
+  const cliName = process.env.RBRAIN_MODE === '1' ? 'rbrain' : 'gbrain';
+  const homeDir = process.env.RBRAIN_MODE === '1' ? '~/.rbrain' : '~/.gbrain';
   console.log(`
 gbrain init — initialize a brain (PGLite or Supabase Postgres)
 
@@ -1498,5 +1500,5 @@ NOTES
     interactive setup. With <1000 files (or with --pglite explicitly), defaults
     to PGLite at ~/.gbrain/brain.pglite.
   - Existing config is preserved unless --force is passed.
-`.trim());
+`.trim().replace(/\bgbrain\b/g, cliName).replace(/~\/\.gbrain/g, homeDir));
 }

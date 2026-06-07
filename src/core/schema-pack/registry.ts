@@ -221,6 +221,118 @@ export function _cacheNamesForTests(): string[] {
   return [..._byName.keys()];
 }
 
+function mergeByName<T extends { name: string }>(base: readonly T[], next: readonly T[]): T[] {
+  const out = new Map<string, T>();
+  for (const item of base) out.set(item.name, item);
+  for (const item of next) out.set(item.name, item);
+  return [...out.values()];
+}
+
+function mergeByKey<T>(base: readonly T[], next: readonly T[], keyFn: (item: T) => string): T[] {
+  const out = new Map<string, T>();
+  for (const item of base) out.set(keyFn(item), item);
+  for (const item of next) out.set(keyFn(item), item);
+  return [...out.values()];
+}
+
+function mergeStrings(base: readonly string[] | undefined, next: readonly string[] | undefined): string[] {
+  return [...new Set([...(base ?? []), ...(next ?? [])])];
+}
+
+function pickBorrowedManifest(
+  manifest: SchemaPackManifest,
+  borrow: NonNullable<SchemaPackManifest['borrow_from']>[number],
+): SchemaPackManifest {
+  const typeSet = borrow.types ? new Set(borrow.types) : null;
+  const linkSet = borrow.link_types ? new Set(borrow.link_types) : null;
+  return {
+    ...manifest,
+    page_types: typeSet
+      ? manifest.page_types.filter((pt) => typeSet.has(pt.name))
+      : manifest.page_types,
+    link_types: linkSet
+      ? manifest.link_types.filter((lt) => linkSet.has(lt.name))
+      : manifest.link_types,
+    // Borrowing is deliberately narrow: types and link types only. Phases,
+    // calibration domains, migrations, and filing rules stay owned by the
+    // active pack or its extends chain.
+    frontmatter_links: [],
+    takes_kinds: [],
+    enrichable_types: [],
+    filing_rules: [],
+    phases: [],
+    calibration_domains: [],
+    mapping_rules: [],
+  };
+}
+
+function mergeManifestChain(
+  child: SchemaPackManifest,
+  contributions: readonly SchemaPackManifest[],
+): SchemaPackManifest {
+  let merged: SchemaPackManifest = {
+    ...child,
+    page_types: [],
+    link_types: [],
+    frontmatter_links: [],
+    takes_kinds: [],
+    enrichable_types: [],
+    filing_rules: [],
+    phases: [],
+    calibration_domains: [],
+    mapping_rules: [],
+  };
+
+  for (const manifest of contributions) {
+    merged = {
+      ...merged,
+      page_types: mergeByName(merged.page_types, manifest.page_types),
+      link_types: mergeByName(merged.link_types, manifest.link_types),
+      frontmatter_links: mergeByKey(
+        merged.frontmatter_links,
+        manifest.frontmatter_links,
+        (l) => `${l.page_type}|${l.link_type}|${l.fields.join(',')}`,
+      ),
+      takes_kinds: mergeStrings(merged.takes_kinds, manifest.takes_kinds),
+      enrichable_types: mergeByKey(
+        merged.enrichable_types,
+        manifest.enrichable_types,
+        (e) => e.type,
+      ),
+      filing_rules: mergeByKey(
+        merged.filing_rules,
+        manifest.filing_rules,
+        (r) => r.kind,
+      ),
+      phases: mergeStrings(merged.phases, manifest.phases),
+      calibration_domains: mergeByName(
+        merged.calibration_domains ?? [],
+        manifest.calibration_domains ?? [],
+      ),
+      mapping_rules: [
+        ...(merged.mapping_rules ?? []),
+        ...(manifest.mapping_rules ?? []),
+      ],
+    };
+  }
+
+  return {
+    ...merged,
+    // Preserve child identity and metadata. The merged arrays above are the
+    // materialized active view; the pack itself is still the child pack.
+    name: child.name,
+    version: child.version,
+    description: child.description,
+    author: child.author,
+    license: child.license,
+    homepage: child.homepage,
+    gbrain_min_version: child.gbrain_min_version,
+    extends: child.extends,
+    borrow_from: child.borrow_from,
+    migration_from: child.migration_from,
+  };
+}
+
 /**
  * Resolve + cache a manifest. Loads parent packs via the `loadByName`
  * dependency, tracks extends-chain depth, applies the E4 cap.
@@ -258,6 +370,7 @@ export async function resolvePack(
   // cache snapshot (codex C6 — child cache entry must remember every
   // parent so invalidatePackCache(parentName) can cascade).
   const chain: string[] = [manifest.name];
+  const extendsManifests: SchemaPackManifest[] = [];
   let cursor: SchemaPackManifest | null = manifest;
   while (cursor?.extends) {
     const parentName = cursor.extends;
@@ -272,15 +385,32 @@ export async function resolvePack(
       opts.onDepthWarn?.(chain.length, chain);
     }
     cursor = await loadByName(parentName);
+    extendsManifests.push(cursor);
   }
 
-  // For v0.38 skeleton: closure is computed on the manifest itself.
-  // Full extends-merging (child-wins) is the v0.41+ T20 follow-up.
-  const alias_graph = buildAliasGraph(manifest);
-  const alias_closure_hash = await computeAliasClosureHash(manifest);
+  const contributions: SchemaPackManifest[] = [];
+  const dependencyNames = new Set(chain);
+  for (const m of [...extendsManifests].reverse()) {
+    for (const borrow of m.borrow_from ?? []) {
+      const borrowed = await loadByName(borrow.pack);
+      dependencyNames.add(borrow.pack);
+      contributions.push(pickBorrowedManifest(borrowed, borrow));
+    }
+    contributions.push(m);
+  }
+  for (const borrow of manifest.borrow_from ?? []) {
+    const borrowed = await loadByName(borrow.pack);
+    dependencyNames.add(borrow.pack);
+    contributions.push(pickBorrowedManifest(borrowed, borrow));
+  }
+  contributions.push(manifest);
+
+  const materialized = mergeManifestChain(manifest, contributions);
+  const alias_graph = buildAliasGraph(materialized);
+  const alias_closure_hash = await computeAliasClosureHash(materialized);
 
   const resolved: ResolvedPack = {
-    manifest,
+    manifest: materialized,
     identity: id,
     manifest_sha8: sha8,
     alias_closure_hash,
@@ -291,7 +421,7 @@ export async function resolvePack(
   // the locator can't resolve (synthetic manifests in tests).
   const files: Array<{ name: string; path: string; mtimeMs: number }> = [];
   if (opts.loadByPath) {
-    for (const n of chain) {
+    for (const n of dependencyNames) {
       const path = opts.loadByPath(n);
       if (path === null) continue;
       files.push({ name: n, path, mtimeMs: safeMtimeMs(path) });
@@ -300,7 +430,7 @@ export async function resolvePack(
 
   _byName.set(manifest.name, {
     resolved,
-    chain: [...chain],
+    chain: [...dependencyNames],
     files,
     lastStatMs: Date.now(),
   });

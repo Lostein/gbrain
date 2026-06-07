@@ -77,6 +77,62 @@ describe('resolvePack — happy path', () => {
     const rb = await resolvePack(b, noop);
     expect(ra.identity).not.toBe(rb.identity);
   });
+
+  test('materializes parent page types and link types from extends chain', async () => {
+    const child = makeManifest('child', 'parent');
+    child.page_types = [{
+      name: 'feishu-doc',
+      primitive: 'media',
+      path_prefixes: ['feishu/docs/'],
+      aliases: ['doc'],
+      extractable: true,
+      expert_routing: false,
+    }];
+    const parent = makeManifest('parent', null);
+    parent.page_types = [{
+      name: 'person',
+      primitive: 'entity',
+      path_prefixes: ['people/'],
+      aliases: ['contact'],
+      extractable: false,
+      expert_routing: true,
+    }];
+    parent.link_types = [{ name: 'mentions' }];
+
+    const resolved = await resolvePack(child, chainLoader({ parent }));
+    expect(resolved.manifest.page_types.map((pt) => pt.name)).toEqual(['person', 'feishu-doc']);
+    expect(resolved.manifest.link_types.map((lt) => lt.name)).toEqual(['mentions']);
+  });
+
+  test('borrows selected page types without borrowing phases', async () => {
+    const child = makeManifest('child', null);
+    child.borrow_from = [{ pack: 'borrowed', types: ['atom'] }];
+    child.phases = ['child_phase'];
+    const borrowed = makeManifest('borrowed', null);
+    borrowed.page_types = [
+      {
+        name: 'atom',
+        primitive: 'concept',
+        path_prefixes: ['atoms/'],
+        aliases: [],
+        extractable: false,
+        expert_routing: false,
+      },
+      {
+        name: 'ignored',
+        primitive: 'concept',
+        path_prefixes: ['ignored/'],
+        aliases: [],
+        extractable: false,
+        expert_routing: false,
+      },
+    ];
+    borrowed.phases = ['borrowed_phase'];
+
+    const resolved = await resolvePack(child, chainLoader({ borrowed }));
+    expect(resolved.manifest.page_types.map((pt) => pt.name)).toEqual(['atom']);
+    expect(resolved.manifest.phases).toEqual(['child_phase']);
+  });
 });
 
 describe('resolvePack — extends-chain depth ladder', () => {

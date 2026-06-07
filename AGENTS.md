@@ -1,32 +1,39 @@
-# Agents working on GBrain
+# Agents working on RBrain / GBrain
 
 This is your install + operating protocol. Claude Code reads `./CLAUDE.md` automatically.
 Everyone else (Codex, Cursor, OpenClaw, Aider, Continue, or an LLM fetching via URL):
 start here.
 
+This fork is Feishu-first. Use `rbrain` for user-facing setup and operation;
+it stores state under `~/.rbrain` and defaults to the `rbrain-feishu` schema
+pack. The original `gbrain` command remains available for compatibility.
+
 ## Install (5 min)
 
-1. Install gbrain via Bun (the canonical path):
+1. Install this fork via Bun (the canonical path):
    ```bash
    curl -fsSL https://bun.sh/install | bash
    export PATH="$HOME/.bun/bin:$PATH"
-   bun install -g github:garrytan/gbrain
+   bun install -g github:Lostein/gbrain
    ```
-   If `bun install -g` aborts or `gbrain doctor` reports `schema_version: 0`,
+   If you are inside a local checkout, use `bun install && bun link` instead.
+   Verify with `rbrain --version`.
+   If `bun install -g` aborts or `rbrain doctor` reports `schema_version: 0`,
    the CLI prints a recovery hint pointing at [#218](https://github.com/garrytan/gbrain/issues/218).
-   Run `gbrain apply-migrations --yes` to recover, or fall back to the
-   deterministic install: `git clone https://github.com/garrytan/gbrain.git ~/gbrain && cd ~/gbrain && bun install && bun link`.
-2. Init the brain: `gbrain init` (defaults to PGLite, zero-config). For 1000+ files or
+   Run `rbrain apply-migrations --yes` to recover, or fall back to the
+   deterministic install: `git clone https://github.com/Lostein/gbrain.git ~/gbrain && cd ~/gbrain && bun install && bun link`.
+2. Init the brain: `rbrain init` (defaults to PGLite, zero-config). For 1000+ files or
    multi-machine sync, init suggests Postgres + pgvector via Supabase.
-3. **STOP — ask the user about search mode.** `gbrain init` auto-applied a
+3. **STOP — ask the user about search mode.** `rbrain init` auto-applied a
    default but printed a 9-cell cost matrix (mode × downstream model)
    preceded by `[AGENT]` markers. You MUST relay the matrix to the operator
    and confirm their choice before continuing. Cost spread between corners
    is 25x — silent acceptance is the wrong default. See
    [`./INSTALL_FOR_AGENTS.md`](./INSTALL_FOR_AGENTS.md) Step 3.5 for the
-   exact ask-the-user protocol. Same banner fires on `gbrain post-upgrade`
+   exact ask-the-user protocol. Same banner fires on `rbrain post-upgrade`
    for existing users (search modes were added in v0.32.3).
-4. Read [`./INSTALL_FOR_AGENTS.md`](./INSTALL_FOR_AGENTS.md) for the full 9-step flow
+4. Read [`./docs/rbrain/feishu.md`](./docs/rbrain/feishu.md) for the Feishu mirror flow,
+   then [`./INSTALL_FOR_AGENTS.md`](./INSTALL_FOR_AGENTS.md) for the full 9-step flow
    (API keys, identity, cron, verification).
 
 ## Read this order
@@ -56,21 +63,21 @@ writing or reviewing an operation, consult `src/core/operations.ts` for the cont
   [`docs/guides/live-sync.md`](./docs/guides/live-sync.md),
   [`docs/mcp/DEPLOY.md`](./docs/mcp/DEPLOY.md).
 - **Debug:** [`docs/GBRAIN_VERIFY.md`](./docs/GBRAIN_VERIFY.md),
-  [`docs/guides/minions-fix.md`](./docs/guides/minions-fix.md), `gbrain doctor --fix`.
-- **Migrate / upgrade:** `gbrain upgrade` (binary self-update + schema migrations + post-upgrade prompts),
+  [`docs/guides/minions-fix.md`](./docs/guides/minions-fix.md), `rbrain doctor --fix`.
+- **Migrate / upgrade:** `rbrain upgrade` (binary self-update + schema migrations + post-upgrade prompts),
   [`docs/UPGRADING_DOWNSTREAM_AGENTS.md`](./docs/UPGRADING_DOWNSTREAM_AGENTS.md),
-  [`skills/migrations/`](./skills/migrations/), `gbrain apply-migrations --yes` (manual schema-only).
+  [`skills/migrations/`](./skills/migrations/), `rbrain apply-migrations --yes` (manual schema-only).
 - **Eval retrieval changes:** capture is off by default. To benchmark a
   retrieval change against real captured queries, set
-  `GBRAIN_CONTRIBUTOR_MODE=1`, then `gbrain eval export --since 7d > base.ndjson`
-  and `gbrain eval replay --against base.ndjson`. For public benchmark
-  coverage (LongMemEval, ground-truth scoring), `gbrain eval longmemeval
+  `GBRAIN_CONTRIBUTOR_MODE=1`, then `rbrain eval export --since 7d > base.ndjson`
+  and `rbrain eval replay --against base.ndjson`. For public benchmark
+  coverage (LongMemEval, ground-truth scoring), `rbrain eval longmemeval
   <dataset.jsonl>` (v0.28.8) runs against an isolated in-memory PGLite
-  per question — your `~/.gbrain` is never opened. Full guide:
+  per question — your `~/.rbrain` is never opened. Full guide:
   [`docs/eval-bench.md`](./docs/eval-bench.md).
 - **Drive the brain to a target health score (v0.36.4.0):** the one-command
-  loop. `gbrain doctor --remediation-plan --json` previews what would be
-  fixed; `gbrain doctor --remediate --yes --target-score 90 --max-usd 5`
+  loop. `rbrain doctor --remediation-plan --json` previews what would be
+  fixed; `rbrain doctor --remediate --yes --target-score 90 --max-usd 5`
   walks a dependency-ordered plan (sync before extract, embed after
   consolidate), re-checking score between every step, refusing to spend
   past the cost cap. Empty brains (no entity pages) or unconfigured embedding
@@ -82,12 +89,12 @@ writing or reviewing an operation, consult `src/core/operations.ts` for the cont
 - **Track a founder/company over time (v0.35.7):** when an entity has
   typed metric claims in its `## Facts` fence (`metric: mrr`, `value: 50000`,
   `unit: USD`, `period: monthly` columns), run
-  `gbrain eval trajectory <entity-slug>` for the chronological history
-  with regressions auto-flagged, or `gbrain founder scorecard <entity-slug>`
+  `rbrain eval trajectory <entity-slug>` for the chronological history
+  with regressions auto-flagged, or `rbrain founder scorecard <entity-slug>`
   for a four-signal JSON rollup (claim_accuracy / consistency /
   growth_trajectory / red_flags). MCP op `find_trajectory` exposes the
   same data — read scope, visibility-filtered for remote callers. **v0.40.2.0:**
-  `gbrain think` now uses this substrate automatically on temporal /
+  `rbrain think` now uses this substrate automatically on temporal /
   knowledge_update intent (default ON; flip `think.trajectory_enabled=false`
   to opt out). Migration v82 added `facts.event_type` so non-metric event
   rows (`meeting`, `job_change`, `location_change`) ride through the same

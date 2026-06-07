@@ -25,6 +25,13 @@ import { callRemoteTool, RemoteMcpError, unpackToolResult } from './core/mcp-cli
 import { maybePromptForUpgrade } from './core/thin-client-upgrade-prompt.ts';
 import { VERSION } from './version.ts';
 
+const CLI_NAME = process.env.RBRAIN_MODE === '1' ? 'rbrain' : 'gbrain';
+
+function brandHelp(text: string): string {
+  if (CLI_NAME === 'gbrain') return text;
+  return text.replace(/\bgbrain\b/g, CLI_NAME);
+}
+
 // Build CLI name -> operation lookup
 const cliOps = new Map<string, Operation>();
 for (const op of operations) {
@@ -35,13 +42,15 @@ for (const op of operations) {
 }
 
 // CLI-only commands that bypass the operation layer
-const CLI_ONLY = new Set(['init', 'reinit-pglite', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'extract-conversation-facts', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'skillpack', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'mounts', 'dream', 'check-resolvable', 'routing-eval', 'skillify', 'smoke-test', 'providers', 'storage', 'repos', 'code-def', 'code-refs', 'reindex', 'reindex-code', 'reindex-frontmatter', 'code-callers', 'code-callees', 'frontmatter', 'auth', 'friction', 'claw-test', 'book-mirror', 'takes', 'think', 'salience', 'anomalies', 'transcripts', 'models', 'remote', 'recall', 'forget', 'edges-backfill', 'cache', 'ze-switch', 'founder', 'brainstorm', 'lsd', 'schema', 'capture', 'onboard', 'conversation-parser', 'status']);
+const CLI_ONLY = new Set(['init', 'reinit-pglite', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'feishu', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'extract-conversation-facts', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'skillpack', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'mounts', 'dream', 'check-resolvable', 'routing-eval', 'skillify', 'smoke-test', 'providers', 'storage', 'repos', 'code-def', 'code-refs', 'reindex', 'reindex-code', 'reindex-frontmatter', 'code-callers', 'code-callees', 'frontmatter', 'auth', 'friction', 'claw-test', 'book-mirror', 'takes', 'think', 'salience', 'anomalies', 'transcripts', 'models', 'remote', 'recall', 'forget', 'edges-backfill', 'cache', 'ze-switch', 'founder', 'brainstorm', 'lsd', 'schema', 'capture', 'onboard', 'conversation-parser', 'status']);
 // CLI-only commands whose handlers print their own --help text. These are
 // excluded from the generic short-circuit so detailed per-command and
 // per-subcommand usage stays reachable.
 const CLI_ONLY_SELF_HELP = new Set([
+  'init',
   'upgrade', 'post-upgrade', 'check-update',
   'embed', 'config',
+  'feishu',
   'skillpack', 'skillpack-check',
   'integrations', 'friction',
   'frontmatter', 'check-resolvable',
@@ -90,7 +99,7 @@ async function main() {
   }
 
   if (command === '--version' || command === 'version') {
-    console.log(`gbrain ${VERSION}`);
+    console.log(`${CLI_NAME} ${VERSION}`);
     return;
   }
 
@@ -130,7 +139,7 @@ async function main() {
   const op = cliOps.get(command);
   if (!op) {
     console.error(`Unknown command: ${command}`);
-    console.error('Run gbrain --help for available commands.');
+    console.error(`Run ${CLI_NAME} --help for available commands.`);
     process.exit(1);
   }
 
@@ -889,6 +898,20 @@ async function handleCliOnly(command: string, args: string[]) {
   if (command === 'integrations') {
     const { runIntegrations } = await import('./commands/integrations.ts');
     await runIntegrations(args);
+    return;
+  }
+  if (command === 'feishu') {
+    const { runFeishu } = await import('./commands/feishu.ts');
+    if ((args[0] === 'setup' || args[0] === 'pull' || args[0] === 'refresh' || args[0] === 'status' || args[0] === 'aily') && !hasHelpFlag(args)) {
+      const engine = await connectEngine();
+      try {
+        await runFeishu(args, { engine });
+      } finally {
+        await engine.disconnect();
+      }
+    } else {
+      await runFeishu(args);
+    }
     return;
   }
   if (command === 'providers') {
@@ -1887,7 +1910,7 @@ function printHelp() {
   const cliNames = Array.from(cliOps.entries())
     .map(([name, op]) => ({ name, desc: op.description }));
 
-  console.log(`gbrain ${VERSION} -- personal knowledge brain
+  console.log(brandHelp(`gbrain ${VERSION} -- personal knowledge brain
 
 USAGE
   gbrain <command> [options]
@@ -1899,6 +1922,8 @@ SETUP
   check-update [--json]              Check for new versions
   doctor [--json] [--fast]            Health check (resolver, skills, pgvector, RLS, embeddings)
   integrations [subcommand]          Manage integration recipes (senses + reflexes)
+  feishu <init|setup|pull|refresh|status|aily|doctor>
+                                      Feishu mirror helpers for RBrain
 
 PAGES
   get <slug>                         Read a page
@@ -2024,7 +2049,7 @@ ADMIN
   --tools-json                       Tool discovery (JSON)
 
 Run gbrain <command> --help for command-specific help.
-`);
+`));
 }
 
 main().catch(e => {

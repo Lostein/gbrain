@@ -1,10 +1,11 @@
 {
   "name": "gbrain",
-  "description": "Postgres-native personal knowledge brain with hybrid RAG search",
+  "description": "Feishu-first personal knowledge brain with hybrid RAG search",
   "type": "module",
   "main": "src/core/index.ts",
   "bin": {
-    "gbrain": "src/cli.ts"
+    "gbrain": "src/cli.ts",
+    "rbrain": "src/rbrain.ts"
   },
   "exports": {
     ".": "./src/core/index.ts",
@@ -30,8 +31,8 @@
   },
   "scripts": {
     "dev": "bun run src/cli.ts",
-    "build": "bun build --compile --outfile bin/gbrain src/cli.ts",
-    "build:all": "bun build --compile --target=bun-darwin-arm64 --outfile bin/gbrain-darwin-arm64 src/cli.ts && bun build --compile --target=bun-linux-x64 --outfile bin/gbrain-linux-x64 src/cli.ts",
+    "build": "bun build --compile --outfile bin/gbrain src/cli.ts && bun build --compile --outfile bin/rbrain src/rbrain.ts",
+    "build:all": "bun build --compile --target=bun-darwin-arm64 --outfile bin/gbrain-darwin-arm64 src/cli.ts && bun build --compile --target=bun-darwin-arm64 --outfile bin/rbrain-darwin-arm64 src/rbrain.ts && bun build --compile --target=bun-linux-x64 --outfile bin/gbrain-linux-x64 src/cli.ts && bun build --compile --target=bun-linux-x64 --outfile bin/rbrain-linux-x64 src/rbrain.ts",
     "build:admin": "cd admin && bun run build && cd .. && bun run scripts/build-admin-embedded.ts",
     "build:admin-embedded": "bun run scripts/build-admin-embedded.ts",
     "build:schema": "bash scripts/build-schema.sh",
@@ -81,7 +82,7 @@
     "check:fixture-privacy": "scripts/check-fixture-privacy.sh",
     "check:conversation-parser": "bun src/cli.ts eval conversation-parser test/fixtures/conversation-formats/all.jsonl --no-llm",
     "check:source-scope-onboard": "scripts/check-source-scope-onboard.sh",
-    "postinstall": "command -v gbrain >/dev/null 2>&1 && gbrain apply-migrations --yes --non-interactive || echo '[gbrain] postinstall skipped. If installed via bun install -g github:...: run `gbrain doctor` and `gbrain apply-migrations --yes` manually. See https://github.com/garrytan/gbrain/issues/218' 1>&2",
+    "postinstall": "command -v rbrain >/dev/null 2>&1 && rbrain apply-migrations --yes --non-interactive || command -v gbrain >/dev/null 2>&1 && gbrain apply-migrations --yes --non-interactive || echo '[rbrain] postinstall skipped. If installed via bun install -g github:...: run `rbrain doctor` and `rbrain apply-migrations --yes` manually. See https://github.com/garrytan/gbrain/issues/218' 1>&2",
     "prepublish:clawhub": "bun run build:all",
     "publish:clawhub": "clawhub package publish . --family bundle-plugin"
   },

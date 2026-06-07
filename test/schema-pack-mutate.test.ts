@@ -99,11 +99,16 @@ describe('locateMutablePackFile — bundled guard', () => {
   });
 
   it('BUNDLED_PACK_NAMES export contains all bundled packs', () => {
-    expect(BUNDLED_PACK_NAMES.has('gbrain-base')).toBe(true);
-    expect(BUNDLED_PACK_NAMES.has('gbrain-recommended')).toBe(true);
-    // v0.42 (T22): gbrain-base-v2 joins the bundled set.
-    expect(BUNDLED_PACK_NAMES.has('gbrain-base-v2')).toBe(true);
-    expect(BUNDLED_PACK_NAMES.size).toBe(3);
+    expect(BUNDLED_PACK_NAMES).toEqual(new Set([
+      'gbrain-base',
+      'gbrain-recommended',
+      'gbrain-creator',
+      'gbrain-investor',
+      'gbrain-engineer',
+      'gbrain-everything',
+      'gbrain-base-v2',
+      'rbrain-feishu',
+    ]));
   });
 
   it('rejects gbrain-base-v2 with PACK_READONLY (bundled guard)', () => {
