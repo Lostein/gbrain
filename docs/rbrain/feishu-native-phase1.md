@@ -200,12 +200,15 @@ The local adapter:
   `sync` requests
 - adds `handleManagedTriggerRequest` for HTTP-style server functions with JSON
   request/response handling and error redaction
+- prints a deployable TypeScript wrapper with
+  `rbrain feishu managed trigger-template`, importing the public
+  `gbrain/feishu-managed` adapter and naming only environment variables
 
 It is intentionally not the final managed backend. The sync path now talks to a
 registry store boundary, and both the default JSON store and the Postgres store
 implement that boundary. The next slice should run the Postgres store against
-the real Serverless PG / Miaoda table layer and add the scheduled trigger around
-`runManagedTrigger`.
+the real Serverless PG / Miaoda table layer using the generated HTTP/scheduled
+trigger wrapper.
 
 ## Acceptance Criteria
 
@@ -235,6 +238,8 @@ Local tests:
   requests
 - HTTP trigger wrapper coverage for method rejection and PostgreSQL URL
   redaction
+- generated trigger template coverage for public import path, scheduled/status
+  entrypoints, and no embedded secrets
 
 Manual platform checks:
 
@@ -263,7 +268,8 @@ Manual platform checks:
    Miaoda table layer.
 3. Run `managed sync --registry-store postgres` against the target Serverless
    PG connection.
-4. Add a real manual/scheduled Miaoda trigger using the same registry store.
+4. Deploy the generated `managed trigger-template` output as a real
+   manual/scheduled Miaoda trigger using the same registry store.
 5. Verify Aily Knowledge Space reaches `successful` for a managed sync asset.
 6. Verify the Aily custom agent answers using the managed asset.
 7. Decide whether `managed sync` remains a developer fixture or becomes the

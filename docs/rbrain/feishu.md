@@ -180,11 +180,34 @@ rbrain feishu managed status \
 The status command does not require an Aily token. It reports source/asset/run
 counts, the latest sync run, Aily status counts, and a Base mirror preview.
 
-For an online trigger, import `runManagedTrigger` from `src/commands/feishu.ts`.
-It accepts an action of `status` or `sync`, reads the same JSON/Postgres store
-configuration, and calls the same job functions used by the CLI:
+For an online trigger, first emit the deployable TypeScript wrapper:
+
+```bash
+rbrain feishu managed trigger-template > feishu-managed-trigger.ts
+rbrain feishu managed trigger-template --json
+```
+
+The generated template imports `handleManagedTriggerRequest` from
+`gbrain/feishu-managed`, exposes HTTP `handler`, `scheduled`, and `status`
+functions, and only names environment variables. It does not embed tokens or
+database URLs. Configure these variables in the target platform:
+
+```text
+RBRAIN_FEISHU_MIRROR_ROOT
+RBRAIN_FEISHU_MANAGED_DATABASE_URL
+RBRAIN_AILY_KNOWLEDGE_SPACE_ID
+RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN
+RBRAIN_FEISHU_MANAGED_BASE_TOKEN
+RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID
+```
+
+The underlying reusable API is `runManagedTrigger`. It accepts an action of
+`status` or `sync`, reads the same JSON/Postgres store configuration, and calls
+the same job functions used by the CLI:
 
 ```ts
+import { runManagedTrigger } from 'gbrain/feishu-managed';
+
 await runManagedTrigger({
   request: {
     action: 'sync',
@@ -210,6 +233,8 @@ For HTTP-style server functions, wrap `handleManagedTriggerRequest` and pass the
 platform request body:
 
 ```ts
+import { handleManagedTriggerRequest } from 'gbrain/feishu-managed';
+
 return handleManagedTriggerRequest({
   request: {
     method: request.method,

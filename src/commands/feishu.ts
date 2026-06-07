@@ -56,6 +56,15 @@ const AILY_DEFAULT_SPACE_ID_ENV = 'RBRAIN_AILY_KNOWLEDGE_SPACE_ID';
 const AILY_FALLBACK_SPACE_ID_ENV = 'AILY_KNOWLEDGE_SPACE_ID';
 const MANAGED_REGISTRY_STORE_ENV = 'RBRAIN_FEISHU_MANAGED_REGISTRY_STORE';
 const MANAGED_REGISTRY_DATABASE_URL_ENV = 'RBRAIN_FEISHU_MANAGED_DATABASE_URL';
+const MANAGED_TRIGGER_TEMPLATE_IMPORT = 'gbrain/feishu-managed';
+const MANAGED_TRIGGER_TEMPLATE_ENV = [
+  'RBRAIN_FEISHU_MIRROR_ROOT',
+  MANAGED_REGISTRY_DATABASE_URL_ENV,
+  AILY_DEFAULT_SPACE_ID_ENV,
+  AILY_DEFAULT_TOKEN_ENV,
+  'RBRAIN_FEISHU_MANAGED_BASE_TOKEN',
+  'RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID',
+] as const;
 const AILY_MAX_ASSET_BYTES = 30 * 1024 * 1024;
 const AILY_OVERVIEW_RELATIVE_PATH = 'feishu/rbrain-feishu-overview.md';
 
@@ -5459,6 +5468,14 @@ export interface ManagedTriggerHttpResponse {
   body: string;
 }
 
+export interface ManagedTriggerTemplateOpts {
+  importSpecifier?: string;
+}
+
+interface ManagedTriggerTemplateCliOpts extends ManagedTriggerTemplateOpts {
+  json: boolean;
+}
+
 function parseManagedTriggerHttpBody(input: string | ManagedTriggerRequest | null | undefined): ManagedTriggerRequest {
   if (input === undefined || input === null || input === '') return {};
   if (typeof input !== 'string') return input;
@@ -5610,6 +5627,115 @@ export async function handleManagedTriggerRequest(input: {
   }
 }
 
+function parseManagedTriggerTemplate(args: string[]): ManagedTriggerTemplateCliOpts {
+  const importSpecifier = parseFlagValue(args, '--import') ?? MANAGED_TRIGGER_TEMPLATE_IMPORT;
+  if (!importSpecifier.trim()) {
+    throw new Error(`${brand()} feishu managed trigger-template --import cannot be empty.`);
+  }
+  return {
+    importSpecifier,
+    json: args.includes('--json'),
+  };
+}
+
+export function buildManagedTriggerTemplate(opts: ManagedTriggerTemplateOpts = {}): string {
+  const importSpecifier = opts.importSpecifier ?? MANAGED_TRIGGER_TEMPLATE_IMPORT;
+  return `import { handleManagedTriggerRequest } from ${JSON.stringify(importSpecifier)};
+
+type Env = Record<string, string | undefined>;
+
+function runtimeEnv(): Env {
+  const globalWithProcess = globalThis as typeof globalThis & { process?: { env?: Env } };
+  return globalWithProcess.process?.env ?? {};
+}
+
+function toWebResponse(response: { status: number; headers: Record<string, string>; body: string }): Response {
+  return new Response(response.body, {
+    status: response.status,
+    headers: response.headers,
+  });
+}
+
+function postgresRegistry(env: Env) {
+  return {
+    store: 'postgres' as const,
+    url: env.RBRAIN_FEISHU_MANAGED_DATABASE_URL,
+    ensureSchema: true,
+  };
+}
+
+export default async function handler(request: Request): Promise<Response> {
+  const response = await handleManagedTriggerRequest({
+    request: {
+      method: request.method,
+      body: await request.text(),
+    },
+    env: runtimeEnv(),
+  });
+  return toWebResponse(response);
+}
+
+export async function scheduled(): Promise<Response> {
+  const env = runtimeEnv();
+  const response = await handleManagedTriggerRequest({
+    request: {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'sync',
+        root: env.RBRAIN_FEISHU_MIRROR_ROOT,
+        trigger: 'schedule',
+        registry: postgresRegistry(env),
+        aily: {
+          knowledgeSpaceId: env.RBRAIN_AILY_KNOWLEDGE_SPACE_ID,
+          tokenEnv: 'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN',
+        },
+        base: {
+          token: env.RBRAIN_FEISHU_MANAGED_BASE_TOKEN,
+          tableId: env.RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID,
+        },
+      }),
+    },
+    env,
+  });
+  return toWebResponse(response);
+}
+
+export async function status(): Promise<Response> {
+  const env = runtimeEnv();
+  const response = await handleManagedTriggerRequest({
+    request: {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'status',
+        registry: postgresRegistry(env),
+      }),
+    },
+    env,
+  });
+  return toWebResponse(response);
+}
+`;
+}
+
+function buildManagedTriggerTemplatePayload(opts: ManagedTriggerTemplateOpts = {}) {
+  const importSpecifier = opts.importSpecifier ?? MANAGED_TRIGGER_TEMPLATE_IMPORT;
+  return {
+    language: 'typescript',
+    import_specifier: importSpecifier,
+    env: Array.from(MANAGED_TRIGGER_TEMPLATE_ENV),
+    template: buildManagedTriggerTemplate({ importSpecifier }),
+  };
+}
+
+function printManagedTriggerTemplate(opts: ManagedTriggerTemplateCliOpts): void {
+  const payload = buildManagedTriggerTemplatePayload(opts);
+  if (opts.json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  console.log(payload.template);
+}
+
 async function runManaged(engine: BrainEngine | undefined, args: string[]): Promise<void> {
   const sub = args[0];
   if (!sub || sub === '--help' || sub === '-h' || sub === 'help') {
@@ -5618,6 +5744,10 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
   }
   if (sub === 'base-template') {
     printManagedBaseTemplate(args.includes('--json'));
+    return;
+  }
+  if (sub === 'trigger-template') {
+    printManagedTriggerTemplate(parseManagedTriggerTemplate(args.slice(1)));
     return;
   }
   if (sub === 'sql-schema') {
@@ -5659,7 +5789,7 @@ async function runManaged(engine: BrainEngine | undefined, args: string[]): Prom
     return;
   }
   if (sub !== 'sync') {
-    throw new Error(`Usage: ${brand()} feishu managed <sync|status|base-template|provision-base|sql-schema> [options]`);
+    throw new Error(`Usage: ${brand()} feishu managed <sync|status|base-template|trigger-template|provision-base|sql-schema> [options]`);
   }
 
   const rawArgs = args.slice(1);
@@ -6105,6 +6235,9 @@ COMMANDS
   managed base-template [--json]
       Print the Feishu Base field template used by managed sync status mirroring.
 
+  managed trigger-template [--json] [--import SPECIFIER]
+      Print a TypeScript HTTP/scheduled trigger wrapper for managed sync/status.
+
   managed sql-schema [--json]
       Print the Postgres DDL for the managed sources/assets/sync_runs registry.
 
@@ -6140,6 +6273,7 @@ EXAMPLES
   ${brand()} feishu pull im-chat-messages --chat-id oc_xxx --sync
   ${brand()} feishu aily push-space --space-id knowledge_space_xxx --dry-run
   ${brand()} feishu managed base-template --json
+  ${brand()} feishu managed trigger-template > feishu-managed-trigger.ts
   ${brand()} feishu managed sql-schema > feishu-managed-registry.sql
   ${brand()} feishu managed provision-base --base-token appxxx --table-name "RBrain Managed Assets" --dry-run --json
   ${brand()} feishu managed sync --path ~/rbrain-feishu --space-id knowledge_space_xxx --dry-run --json

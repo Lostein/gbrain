@@ -47,6 +47,7 @@ import {
   buildMailTriageScript,
   buildMirrorReadme,
   buildMirrorGitignore,
+  buildManagedTriggerTemplate,
   buildMinutesSearchScript,
   buildMinutesSearchMarkdown,
   buildOkrCycleDetailMarkdown,
@@ -331,6 +332,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
     expect(stdout).toContain('managed status [--path DIR]');
     expect(stdout).toContain('managed base-template [--json]');
+    expect(stdout).toContain('managed trigger-template [--json]');
     expect(stdout).toContain('managed sql-schema [--json]');
     expect(stdout).toContain('managed provision-base --base-token TOKEN');
   });
@@ -665,6 +667,59 @@ describe('rbrain feishu command helpers', () => {
     expect(errorResponse.status).toBe(400);
     expect(errorResponse.body).not.toContain('secret-password');
     expect(errorResponse.body).not.toContain(pgUrl);
+  });
+
+  test('managed trigger template imports the public adapter without embedding secrets', () => {
+    const template = buildManagedTriggerTemplate({
+      importSpecifier: 'gbrain/feishu-managed',
+    });
+
+    expect(template).toContain('handleManagedTriggerRequest');
+    expect(template).toContain('from "gbrain/feishu-managed"');
+    expect(template).toContain('export default async function handler');
+    expect(template).toContain('export async function scheduled');
+    expect(template).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
+    expect(template).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_ID');
+    expect(template).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN');
+    expect(template).not.toContain('secret-token');
+    expect(template).not.toContain('postgresql://user:secret-password');
+  });
+
+  test('managed trigger-template prints a JSON deployment template', () => {
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'trigger-template',
+        '--json',
+        '--import',
+        'gbrain/feishu-managed',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      language: string;
+      import_specifier: string;
+      env: string[];
+      template: string;
+    };
+
+    expect(payload.language).toBe('typescript');
+    expect(payload.import_specifier).toBe('gbrain/feishu-managed');
+    expect(payload.env).toContain('RBRAIN_FEISHU_MIRROR_ROOT');
+    expect(payload.env).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
+    expect(payload.env).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_ID');
+    expect(payload.env).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN');
+    expect(payload.template).toContain('scheduled');
+    expect(payload.template).toContain('status');
+    expect(JSON.stringify(payload)).not.toContain('secret-token');
+    expect(JSON.stringify(payload)).not.toContain('postgresql://user:secret-password');
   });
 
   test('managed registry store config defaults to JSON and redacts Postgres URLs', async () => {
