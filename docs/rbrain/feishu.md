@@ -281,7 +281,10 @@ only after the status probe is healthy:
 rbrain feishu managed probe --action status --url https://example.com/trigger --json
 rbrain feishu managed probe --action sync --root ~/rbrain-feishu --url https://example.com/trigger --json
 rbrain feishu managed probe --action refresh-status --url https://example.com/trigger --json
-rbrain feishu managed wait-status --registry-url "$RBRAIN_FEISHU_MANAGED_DATABASE_URL" --space-id "$RBRAIN_AILY_KNOWLEDGE_SPACE_ID" --json
+rbrain feishu managed wait-status \
+  --registry-url "$RBRAIN_FEISHU_MANAGED_DATABASE_URL" \
+  --space-id "$RBRAIN_AILY_KNOWLEDGE_SPACE_ID" \
+  --json
 ```
 
 For a one-command deployment canary, run status first, then dry-run sync, then
@@ -291,9 +294,27 @@ refresh-status:
 rbrain feishu managed canary --root ~/rbrain-feishu --url https://example.com/trigger --json
 ```
 
+For an end-to-end production canary, enable the real sync and let the local CLI
+poll the deployed trigger's refresh-status path until Aily reports the target
+state:
+
+```bash
+rbrain feishu managed canary \
+  --root ~/rbrain-feishu \
+  --url https://example.com/trigger \
+  --no-dry-run \
+  --wait-status \
+  --target-status successful \
+  --timeout-ms 300000 \
+  --json
+```
+
 If the status step fails, sync is skipped. If sync fails, refresh-status is
 skipped. Use `--status-only` when validating only Serverless PG and trigger
-reachability before wiring the mirror root.
+reachability before wiring the mirror root. `--wait-status` keeps the wait on
+the trusted local operator side and sends short refresh-status requests to the
+deployed trigger, so the platform function does not need to hold a long-running
+request open.
 
 The generated template imports `handleManagedTriggerRequest` from
 `gbrain/feishu-managed`, exposes HTTP `handler`, `scheduled`, `status`, and
