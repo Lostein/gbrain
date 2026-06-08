@@ -278,12 +278,16 @@ runtime receives normalized asset content in the request body instead.
 `--target sync` treats the same Aily token as required before real scheduled
 sync or `--no-dry-run`.
 `managed deploy-plan` reuses the canary env check, then prints an ordered,
-secret-safe sequence for registry provisioning, trigger deployment, status-only
-local function smoke, local runtime startup, local HTTP smoke, deployed
-status-only canary, production canary with `--wait-status`, registry
-inspection, and the final Aily custom-agent answer check. In `--source-input
-inline` mode the generated deploy-bundle command also keeps `--source-input
-inline`, so the bundle includes the inline fetcher example and local scheduled
+secret-safe sequence for registry provisioning, optional Feishu Base status
+table preparation, trigger deployment, status-only local function smoke, local
+runtime startup, local HTTP smoke, deployed status-only canary, production
+canary with `--wait-status`, registry inspection, and the final Aily
+custom-agent answer check. When both Base status mirror variables are present,
+the Base step points at `managed refresh-status` so the readable governance row
+can be updated from registry/Aily state without a second content upload. In
+`--source-input inline` mode the generated deploy-bundle command keeps
+the same source-input flag, so the bundle includes the inline fetcher example
+and local scheduled
 debug route before upload. If `RBRAIN_FEISHU_INLINE_SOURCES_JSON` is not set,
 env-check warns rather than blocking because production fetchers can replace
 that local sample env with tenant Feishu API calls.
@@ -545,6 +549,11 @@ in JSON output.
 The same Base mirror flags are supported by `managed refresh-status`, so the
 Base table can reflect Aily's latest learning state without re-uploading
 unchanged Markdown snapshots.
+`managed deploy-plan` includes a `base-status-table` step for this path: with
+no Base env it prints the field contract as an optional setup step; with only
+one Base env variable it blocks until the pair is complete; with both Base env
+variables it prints the secret-safe `refresh-status` command that updates the
+Base row.
 
 For Serverless PG / Miaoda storage, emit the managed registry DDL:
 

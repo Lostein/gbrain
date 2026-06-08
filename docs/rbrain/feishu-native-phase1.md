@@ -233,8 +233,13 @@ The local adapter:
   without printing secret values
 - prints a secret-safe, ordered online rollout checklist with
   `rbrain feishu managed deploy-plan`, covering env readiness, registry
-  provisioning, trigger deployment, canary checks, status inspection, and the
-  final Aily agent answer check
+  provisioning, optional Feishu Base status table readiness, trigger
+  deployment, canary checks, status inspection, and the final Aily agent answer
+  check
+- includes a deploy-plan `base-status-table` step that prints the Base field
+  contract when Base is not configured, blocks partial Base env pairs, and uses
+  `refresh-status` to update readable Base rows when the Base mirror is
+  configured
 - lets `managed env-check --source-input inline` and
   `managed deploy-plan --source-input inline` validate the online inline path
   without requiring `RBRAIN_FEISHU_MIRROR_ROOT`
@@ -305,7 +310,8 @@ Local tests:
 - managed env-check coverage for required variables, canary refresh-status
   token requirements, optional Base mirror pairing, and no value leakage
 - managed deploy-plan coverage for ordered rollout commands, missing config
-  blockers, env-file loading, inline source input, and no secret/path leakage
+  blockers, optional Base status table setup/refresh states, env-file loading,
+  inline source input, and no secret/path leakage
 - managed probe coverage for status/sync/refresh-status request generation,
   dry-run default, HTTP POST wiring, and runtime env fallback
 - managed canary coverage for status-before-sync sequencing, refresh-status
@@ -332,7 +338,9 @@ Manual platform checks:
   reaching `successful`.
 - `managed wait-status` persists that `successful` state to the registry/Base
   row.
-- Feishu Base shows a readable asset row.
+- The deploy-plan `base-status-table` step is either completed or explicitly
+  skipped for the prototype, and Feishu Base shows a readable asset row when
+  enabled.
 - Aily agent can answer a question using the uploaded asset.
 
 ## Open Questions
@@ -354,24 +362,29 @@ Manual platform checks:
 3. Run `managed deploy-plan --source-input inline --url ... --env-file ...`
    and keep its JSON output as the canonical rollout checklist for the target
    runtime.
-4. Follow the deploy-plan `local-function-smoke`, `start-local-runtime`, and
+4. Follow the deploy-plan `base-status-table` step: if Base governance is in
+   scope, run `provision-base`, set both Base env variables, and rerun the plan
+   until the step points at `refresh-status`; otherwise record that Base was
+   skipped for this prototype pass.
+5. Follow the deploy-plan `local-function-smoke`, `start-local-runtime`, and
    `local-smoke` steps: run `bun run smoke:local`, start the generated local
    server, `managed canary --url http://127.0.0.1:8787 --status-only`, and for
    inline bundles the scheduled debug route before uploading the trigger.
-5. Send one inline normalized Feishu source item through the managed trigger
+6. Send one inline normalized Feishu source item through the managed trigger
    and confirm it writes an Aily asset plus registry row.
-6. Optionally run `managed sync --registry-store postgres` against the target
+7. Optionally run `managed sync --registry-store postgres` against the target
    Serverless PG connection as a developer fixture if mirror parity still
    needs validation.
-7. Deploy the generated `managed deploy-bundle` output as a real
+8. Deploy the generated `managed deploy-bundle` output as a real
    manual/scheduled Miaoda trigger using the same registry store.
-8. Run `managed env-check --target canary --source-input inline`, then
+9. Run `managed env-check --target canary --source-input inline`, then
    `managed canary --asset-json ... --url ... --no-dry-run --wait-status` or
    separate `managed probe` status/sync/refresh-status checks.
-9. If the trigger canary is split into separate steps, run `managed
+10. If the trigger canary is split into separate steps, run `managed
    wait-status` against the same registry store and verify Aily Knowledge Space
    reaches `successful` for a managed sync asset.
-10. Verify the Base status row updates without a second content upload.
-11. Verify the Aily custom agent answers using the managed asset.
-12. Decide whether `managed sync` remains a developer fixture or becomes the
+11. Verify the Base status row updates through the deploy-plan
+    `base-status-table` refresh-status command without a second content upload.
+12. Verify the Aily custom agent answers using the managed asset.
+13. Decide whether `managed sync` remains a developer fixture or becomes the
    canonical debugging client for the online control plane.

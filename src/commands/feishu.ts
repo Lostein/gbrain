@@ -7379,6 +7379,38 @@ export function buildManagedDeployPlan(opts: {
     ? `Set required runtime variables first: ${missingRequiredEnvKeys.join(', ')}.`
     : undefined;
   const canRunRemote = !hasMissingEnv && Boolean(opts.url);
+  const baseCheck = envCheck.checks.find((check) => check.id === 'base_status_table');
+  const baseConfigured = Boolean(
+    baseCheck?.present.includes(MANAGED_BASE_TOKEN_ENV)
+      && baseCheck.present.includes(MANAGED_BASE_TABLE_ID_ENV),
+  );
+  const registryMissing = envCheck.checks.find((check) => check.id === 'serverless_pg')?.status
+    === 'missing';
+  const baseStepStatus: ManagedDeployPlanStep['status'] =
+    baseCheck?.status === 'warn' || (baseConfigured && registryMissing)
+      ? 'blocked'
+      : baseConfigured
+        ? 'ready'
+        : 'manual';
+  const baseStepTitle = baseConfigured
+    ? 'Refresh Feishu Base status mirror from the registry'
+    : 'Prepare optional Feishu Base status table';
+  const baseStepCommand = baseConfigured
+    ? [
+        `rbrain feishu managed refresh-status --registry-store postgres`,
+        `--registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}"`,
+        `--base-token "$${MANAGED_BASE_TOKEN_ENV}"`,
+        `--base-table-id "$${MANAGED_BASE_TABLE_ID_ENV}"`,
+        `--json`,
+      ].join(' ')
+    : `rbrain feishu managed base-template --json`;
+  const baseStepReason = baseCheck?.status === 'warn'
+    ? baseCheck.message
+    : baseConfigured && registryMissing
+      ? `Set ${MANAGED_REGISTRY_DATABASE_URL_ENV} before mirroring Base status from the registry.`
+      : baseConfigured
+        ? 'Refresh-status can update readable Feishu Base rows without re-uploading unchanged assets.'
+        : `Run provision-base, then set ${MANAGED_BASE_TOKEN_ENV} and ${MANAGED_BASE_TABLE_ID_ENV} to enable the governance table.`;
 
   const steps: ManagedDeployPlanStep[] = [
     managedDeployStep({
@@ -7395,6 +7427,14 @@ export function buildManagedDeployPlan(opts: {
       command: `rbrain feishu managed provision-registry --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --json`,
       reason: missingEnvReason,
       depends_on: ['env-check'],
+    }),
+    managedDeployStep({
+      id: 'base-status-table',
+      title: baseStepTitle,
+      status: baseStepStatus,
+      command: baseStepCommand,
+      reason: baseStepReason,
+      depends_on: ['provision-registry'],
     }),
     managedDeployStep({
       id: 'deploy-trigger',
@@ -7471,6 +7511,10 @@ export function buildManagedDeployPlan(opts: {
   ];
   if (envCheck.checks.find((check) => check.id === 'base_status_table')?.status === 'warn') {
     notes.push('The optional Feishu Base mirror is incomplete; ingestion can still proceed, but the governance table will not be fully updated.');
+  } else if (baseConfigured) {
+    notes.push('Feishu Base status mirroring is configured; refresh-status can update the readable governance table without a second content upload.');
+  } else {
+    notes.push('Feishu Base status mirroring is optional but not configured; use the base-status-table step when a native governance table is required.');
   }
   if (envCheck.checks.find((check) => check.id === 'inline_smoke_sources')?.status === 'warn') {
     notes.push(`Set ${MANAGED_INLINE_SOURCES_JSON_ENV} to make the generated local inline scheduled smoke move sample content; production fetchers can use tenant Feishu APIs instead.`);
