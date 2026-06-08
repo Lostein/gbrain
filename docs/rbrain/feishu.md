@@ -364,11 +364,13 @@ request open.
 
 The generated template imports `handleManagedTriggerRequest` from
 `gbrain/feishu-managed`, exposes HTTP `handler`, `scheduled`, `status`, and
-`refreshStatus` functions, and only names environment variables. Inline
-templates also export `syncInlineAssets(assets, trigger)` so a Miaoda/server
-function can fetch and normalize Feishu items before calling the managed sync
-adapter. It does not embed tokens or database URLs. Configure these variables
-in the target platform:
+`refreshStatus` functions, and only names environment variables. Each generated
+entrypoint accepts an optional `env`/bindings object for server-function
+platforms; when it is not supplied, the local smoke server falls back to
+`process.env`. Inline templates also export
+`syncInlineAssets(assets, trigger, env)` so a Miaoda/server function can fetch
+and normalize Feishu items before calling the managed sync adapter. It does not
+embed tokens or database URLs. Configure these variables in the target platform:
 
 ```text
 RBRAIN_FEISHU_MIRROR_ROOT

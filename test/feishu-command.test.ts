@@ -953,9 +953,12 @@ describe('rbrain feishu command helpers', () => {
 
     expect(template).toContain('handleManagedTriggerRequest');
     expect(template).toContain('from "gbrain/feishu-managed"');
-    expect(template).toContain('export default async function handler');
-    expect(template).toContain('export async function scheduled');
-    expect(template).toContain('export async function refreshStatus');
+    expect(template).toContain('function runtimeEnv(envOverride?: Env)');
+    expect(template).toContain('if (envOverride) return envOverride');
+    expect(template).toContain('export default async function handler(request: Request, envOverride?: Env)');
+    expect(template).toContain('export async function scheduled(envOverride?: Env)');
+    expect(template).toContain('export async function status(envOverride?: Env)');
+    expect(template).toContain('export async function refreshStatus(envOverride?: Env)');
     expect(template).toContain("action: 'refresh-status'");
     expect(template).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
     expect(template).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_ID');
@@ -971,6 +974,9 @@ describe('rbrain feishu command helpers', () => {
     });
 
     expect(template).toContain('export async function syncInlineAssets');
+    expect(template).toContain('syncInlineAssets(assets: InlineAsset[], trigger = \'api\', envOverride?: Env)');
+    expect(template).toContain('runtime_env_bound');
+    expect(template).toContain('required_env_present');
     expect(template).toContain('Inline scheduled sync must fetch and normalize Feishu items');
     expect(template).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
     expect(template).not.toContain('root: env.');
@@ -1062,6 +1068,7 @@ describe('rbrain feishu command helpers', () => {
       'package.json',
     ]);
     expect(byPath.get('feishu-managed-trigger.ts')).toContain('from "gbrain/feishu-managed"');
+    expect(byPath.get('feishu-managed-trigger.ts')).toContain('envOverride?: Env');
     expect(byPath.get('feishu-managed-local-server.ts')).toContain("import handler from './feishu-managed-trigger.ts'");
     expect(byPath.get('feishu-managed-local-server.ts')).toContain('Bun.serve');
     expect(byPath.get('feishu-managed-registry.sql')).toContain('feishu_managed_assets');
@@ -1082,6 +1089,7 @@ describe('rbrain feishu command helpers', () => {
     expect(byPath.get('README.md')).toContain('status probe');
     expect(byPath.get('README.md')).toContain('managed deploy-plan');
     expect(byPath.get('README.md')).toContain('managed canary');
+    expect(byPath.get('README.md')).toContain('handler(request, env)');
     expect(byPath.get('README.md')).toContain('bun run start');
     expect(byPath.get('README.md')).toContain('http://127.0.0.1:8787');
     expect(JSON.stringify(files)).not.toContain('secret-token');
@@ -1096,6 +1104,7 @@ describe('rbrain feishu command helpers', () => {
     const byPath = new Map(files.map((file) => [file.path, file.content]));
 
     expect(byPath.get('feishu-managed-trigger.ts')).toContain('syncInlineAssets');
+    expect(byPath.get('feishu-managed-trigger.ts')).toContain('runtime_env_bound');
     expect(byPath.get('feishu-managed-trigger.ts')).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
     expect(byPath.get('.env.example')).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
     expect(byPath.get('.env.example')).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL=');
