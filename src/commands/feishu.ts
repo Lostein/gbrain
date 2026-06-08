@@ -7974,6 +7974,37 @@ export async function runManagedTriggerCanary(opts: {
   const steps: ManagedTriggerCanaryStep[] = [];
   const now = opts.now ?? (() => Date.now());
   const sleep = opts.sleep ?? sleepMs;
+  const capabilitiesRequest = buildManagedTriggerProbeRequest({
+    action: 'capabilities',
+    sourceId: opts.sourceId,
+    ensureSchema: opts.ensureSchema,
+  });
+  const capabilitiesProbe = await sendManagedTriggerProbe({
+    url: opts.url,
+    request: capabilitiesRequest,
+    fetchImpl: opts.fetchImpl,
+  });
+  steps.push(managedCanaryStep('capabilities', capabilitiesProbe));
+
+  if (capabilitiesProbe.status !== 'ok') {
+    steps.push({
+      name: 'status',
+      status: 'skipped',
+      reason: 'capabilities probe failed',
+    });
+    steps.push({
+      name: 'sync',
+      status: 'skipped',
+      reason: 'capabilities probe failed',
+    });
+    return {
+      status: 'error',
+      url: redactDeep(opts.url),
+      dry_run: opts.dryRun ?? true,
+      steps,
+    };
+  }
+
   const statusRequest = buildManagedTriggerProbeRequest({
     action: 'status',
     sourceId: opts.sourceId,

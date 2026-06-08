@@ -342,8 +342,8 @@ names, reports whether the registry URL is present without printing it, and
 compares mirror and inline canary readiness. Use it first when validating
 Miaoda/server-function runtime access.
 
-For a one-command deployment canary, run status first, then dry-run sync, then
-refresh-status:
+For a one-command deployment canary, run capabilities first, then status,
+dry-run sync, and refresh-status:
 
 ```bash
 rbrain feishu managed canary --root ~/rbrain-feishu --url https://example.com/trigger --json
