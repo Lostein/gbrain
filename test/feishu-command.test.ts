@@ -349,7 +349,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('managed deploy-bundle [--out DIR]');
     expect(stdout).toContain('[--source-input mirror|inline]');
     expect(stdout).toContain('managed deploy-plan [--url URL]');
-    expect(stdout).toContain('managed env-check [--target status|canary|sync]');
+    expect(stdout).toContain('managed env-check [--target capabilities|status|canary|sync]');
     expect(stdout).toContain('[--source-input mirror|inline]');
     expect(stdout).toContain('managed probe [--action capabilities|status|sync|refresh-status]');
     expect(stdout).toContain('managed canary --url URL');
@@ -1747,6 +1747,27 @@ describe('rbrain feishu command helpers', () => {
     expect(JSON.stringify(result)).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
   });
 
+  test('managed env check supports capabilities target before remote probing', () => {
+    const result = buildManagedEnvCheck({
+      target: 'capabilities',
+      sourceInput: 'inline',
+      env: {
+        RBRAIN_FEISHU_MANAGED_DATABASE_URL: 'postgresql://user:secret-password@example.com:5432/rbrain',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_ID: 'knowledge_space_test',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN: 'secret-token',
+      },
+    });
+
+    expect(result.status).toBe('warn');
+    expect(result.target).toBe('capabilities');
+    expect(result.source_input).toBe('inline');
+    expect(result.checks.find((check) => check.id === 'mirror_root')).toBeUndefined();
+    expect(result.next_steps.join('\n')).toContain('--action capabilities');
+    expect(JSON.stringify(result)).not.toContain('secret-password');
+    expect(JSON.stringify(result)).not.toContain('secret-token');
+    expect(JSON.stringify(result)).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
+  });
+
   test('managed env check accepts inline local smoke sources when present', () => {
     const result = buildManagedEnvCheck({
       target: 'canary',
@@ -2179,6 +2200,43 @@ describe('rbrain feishu command helpers', () => {
     expect(calls).toEqual(['capabilities']);
     expect(result.steps).toHaveLength(3);
     expect(result.steps[0]!.status).toBe('error');
+    expect(result.steps[1]).toMatchObject({
+      name: 'status',
+      status: 'skipped',
+      reason: 'capabilities probe failed',
+    });
+    expect(result.steps[2]).toMatchObject({
+      name: 'sync',
+      status: 'skipped',
+      reason: 'capabilities probe failed',
+    });
+  });
+
+  test('managed canary skips status and sync when capabilities report warn', async () => {
+    const calls: string[] = [];
+    const result = await runManagedTriggerCanary({
+      url: 'https://runtime.example/trigger',
+      root: '/tmp/rbrain-feishu',
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        calls.push(String(body.action));
+        return new Response(JSON.stringify({
+          action: body.action,
+          status: body.action === 'capabilities' ? 'warn' : 'ok',
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+
+    expect(result.status).toBe('error');
+    expect(calls).toEqual(['capabilities']);
+    expect(result.steps[0]).toMatchObject({
+      name: 'capabilities',
+      status: 'error',
+      reason: 'capabilities probe reported warn',
+    });
     expect(result.steps[1]).toMatchObject({
       name: 'status',
       status: 'skipped',
