@@ -353,8 +353,9 @@ Manual platform checks:
 3. Run `managed deploy-plan --source-input inline --url ... --env-file ...`
    and keep its JSON output as the canonical rollout checklist for the target
    runtime.
-4. Run the generated local server and `managed canary --url
-   http://127.0.0.1:8787 --status-only` before uploading the trigger.
+4. Follow the deploy-plan `local-smoke` step: run the generated local server,
+   `managed canary --url http://127.0.0.1:8787 --status-only`, and for inline
+   bundles the scheduled debug route before uploading the trigger.
 5. Send one inline normalized Feishu source item through the managed trigger
    and confirm it writes an Aily asset plus registry row.
 6. Optionally run `managed sync --registry-store postgres` against the target
