@@ -349,6 +349,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('managed env-check [--target status|canary|sync]');
     expect(stdout).toContain('managed probe [--action status|sync|refresh-status]');
     expect(stdout).toContain('managed canary --url URL');
+    expect(stdout).toContain('[--asset-json JSON]');
     expect(stdout).toContain('[--wait-status]');
     expect(stdout).toContain('managed sql-schema [--json]');
     expect(stdout).toContain('managed provision-registry --registry-url POSTGRES_URL');
@@ -1339,6 +1340,31 @@ describe('rbrain feishu command helpers', () => {
         dryRun: true,
       },
     });
+
+    const inlineSyncProbe = buildManagedTriggerProbeRequest({
+      action: 'sync',
+      assets: [{
+        sourceUri: 'https://feishu.example/doc/roadmap',
+        normalizedTextUri: 'feishu/docs/roadmap.md',
+        content: '# Roadmap\n\nOnline source text.\n',
+      }],
+    });
+    expect(inlineSyncProbe).toEqual({
+      action: 'sync',
+      trigger: 'probe',
+      registry: {
+        store: 'postgres',
+        ensureSchema: true,
+      },
+      aily: {
+        dryRun: true,
+      },
+      assets: [{
+        sourceUri: 'https://feishu.example/doc/roadmap',
+        normalizedTextUri: 'feishu/docs/roadmap.md',
+        content: '# Roadmap\n\nOnline source text.\n',
+      }],
+    });
   });
 
   test('managed probe can POST a request with JSON headers', async () => {
@@ -1402,6 +1428,34 @@ describe('rbrain feishu command helpers', () => {
     expect((calls[1]!.body.aily as Record<string, unknown>).dryRun).toBe(true);
     expect((calls[2]!.body.aily as Record<string, unknown>).dryRun).toBe(true);
     expect(result.steps.map((step) => step.status)).toEqual(['ok', 'ok', 'ok']);
+  });
+
+  test('managed canary sends inline assets only during sync step', async () => {
+    const calls: Array<{ action?: string; body: Record<string, unknown> }> = [];
+    const assets = [{
+      sourceUri: 'https://feishu.example/wiki/architecture',
+      normalizedTextUri: 'feishu/wiki/architecture.md',
+      content: '# Architecture\n\nManaged inline canary text.\n',
+    }];
+    const result = await runManagedTriggerCanary({
+      url: 'https://runtime.example/trigger',
+      assets,
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        calls.push({ action: String(body.action), body });
+        return new Response(JSON.stringify({ action: body.action, status: 'ok' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+
+    expect(result.status).toBe('ok');
+    expect(calls.map((call) => call.action)).toEqual(['status', 'sync', 'refresh-status']);
+    expect(calls[0]!.body).not.toHaveProperty('assets');
+    expect(calls[1]!.body).not.toHaveProperty('root');
+    expect(calls[1]!.body.assets).toEqual(assets);
+    expect(calls[2]!.body).not.toHaveProperty('assets');
   });
 
   test('managed canary can wait for refresh-status target state', async () => {
@@ -1613,6 +1667,59 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.request.registry).toEqual({ store: 'postgres', ensureSchema: true });
     expect(payload.request.aily.dryRun).toBe(true);
     expect(proc.stdout.toString()).not.toContain('secret-token');
+    expect(proc.stdout.toString()).not.toContain('postgresql://');
+  });
+
+  test('managed probe CLI previews an inline asset sync request without mirror root', () => {
+    const assetJson = JSON.stringify({
+      sourceUri: 'https://feishu.example/doc/roadmap',
+      normalizedTextUri: 'feishu/docs/roadmap.md',
+      content: '# Roadmap\n\nOnline source text.\n',
+    });
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'probe',
+        '--action',
+        'sync',
+        '--asset-json',
+        assetJson,
+        '--json',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      status: string;
+      request: {
+        action: string;
+        root?: string;
+        assets: Array<{
+          sourceUri: string;
+          normalizedTextUri: string;
+          content: string;
+        }>;
+        registry: { store: string; ensureSchema: boolean };
+        aily: { dryRun: boolean };
+      };
+    };
+
+    expect(payload.status).toBe('preview');
+    expect(payload.request.action).toBe('sync');
+    expect(payload.request.root).toBeUndefined();
+    expect(payload.request.assets).toEqual([{
+      sourceUri: 'https://feishu.example/doc/roadmap',
+      normalizedTextUri: 'feishu/docs/roadmap.md',
+      content: '# Roadmap\n\nOnline source text.\n',
+    }]);
+    expect(payload.request.registry).toEqual({ store: 'postgres', ensureSchema: true });
+    expect(payload.request.aily.dryRun).toBe(true);
     expect(proc.stdout.toString()).not.toContain('postgresql://');
   });
 

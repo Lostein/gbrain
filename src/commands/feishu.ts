@@ -6090,6 +6090,7 @@ interface ManagedDeployBundleOpts extends ManagedTriggerTemplateOpts {
 export interface ManagedTriggerProbeOpts {
   action?: ManagedTriggerAction;
   root?: string;
+  assets?: ManagedInlineAssetInput[];
   sourceId?: string;
   ensureSchema?: boolean;
   dryRun?: boolean;
@@ -6662,7 +6663,9 @@ rbrain feishu managed canary --url https://your-runtime.example/trigger --status
 \`\`\`bash
 rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --json
 rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
+rbrain feishu managed probe --action sync --asset-json '{"sourceUri":"https://feishu.example/doc/smoke","normalizedTextUri":"feishu/docs/smoke.md","content":"# Smoke\\n\\nInline sample text."}' --url https://your-runtime.example/trigger --json
 rbrain feishu managed canary --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
+rbrain feishu managed canary --asset-json '{"sourceUri":"https://feishu.example/doc/smoke","normalizedTextUri":"feishu/docs/smoke.md","content":"# Smoke\\n\\nInline sample text."}' --url https://your-runtime.example/trigger --json
 rbrain feishu managed canary --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --no-dry-run --wait-status --json
 rbrain feishu managed probe --action refresh-status --url https://your-runtime.example/trigger --json
 rbrain feishu managed wait-status --registry-url "$RBRAIN_FEISHU_MANAGED_DATABASE_URL" --space-id "$RBRAIN_AILY_KNOWLEDGE_SPACE_ID" --json
@@ -7102,12 +7105,84 @@ function parseManagedHttpUrl(raw: string | undefined, command: string, required 
   return raw;
 }
 
+function parseManagedInlineAssetString(
+  obj: Record<string, unknown>,
+  key: keyof ManagedInlineAssetInput,
+  index: number,
+): string | undefined {
+  const value = obj[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') {
+    throw new Error(`managed inline asset ${index + 1} ${key} must be a string.`);
+  }
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function parseManagedInlineAssetInput(raw: unknown, index: number): ManagedInlineAssetInput {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`managed inline asset ${index + 1} must be a JSON object.`);
+  }
+  const obj = raw as Record<string, unknown>;
+  const sourceUri = parseManagedInlineAssetString(obj, 'sourceUri', index);
+  if (!sourceUri) throw new Error(`managed inline asset ${index + 1} requires sourceUri.`);
+  const rawContent = obj.content;
+  if (typeof rawContent !== 'string') {
+    throw new Error(`managed inline asset ${index + 1} content must be a string.`);
+  }
+  if (!rawContent.trim()) throw new Error(`managed inline asset ${index + 1} requires non-empty content.`);
+
+  const asset: ManagedInlineAssetInput = {
+    sourceUri,
+    content: rawContent,
+  };
+  const title = parseManagedInlineAssetString(obj, 'title', index);
+  if (title) asset.title = title;
+  const normalizedTextUri = parseManagedInlineAssetString(obj, 'normalizedTextUri', index);
+  if (normalizedTextUri) asset.normalizedTextUri = normalizedTextUri;
+  const sourceUrl = parseManagedInlineAssetString(obj, 'sourceUrl', index);
+  if (sourceUrl) asset.sourceUrl = sourceUrl;
+  const ailyAssetTitle = parseManagedInlineAssetString(obj, 'ailyAssetTitle', index);
+  if (ailyAssetTitle) asset.ailyAssetTitle = ailyAssetTitle;
+  return asset;
+}
+
+function parseManagedInlineAssetJson(raw: string, flagName: string): ManagedInlineAssetInput[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${flagName} must be valid JSON: ${message}`);
+  }
+  const inputs = Array.isArray(parsed) ? parsed : [parsed];
+  if (inputs.length === 0) throw new Error(`${flagName} must include at least one asset.`);
+  return inputs.map((input, index) => parseManagedInlineAssetInput(input, index));
+}
+
+function parseManagedInlineAssetJsonFlags(args: string[]): ManagedInlineAssetInput[] | undefined {
+  const rawValues: Array<{ flagName: string; value: string }> = [];
+  for (let i = 0; i < args.length; i++) {
+    const flagName = args[i];
+    if (flagName !== '--asset-json' && flagName !== '--assets-json') continue;
+    const value = args[i + 1];
+    if (!value || value.startsWith('--')) throw new Error(`${flagName} requires a JSON value.`);
+    rawValues.push({ flagName, value });
+    i++;
+  }
+  if (rawValues.length === 0) return undefined;
+  return rawValues.flatMap(({ flagName, value }) => parseManagedInlineAssetJson(value, flagName));
+}
+
 function parseManagedTriggerProbe(args: string[]): ManagedTriggerProbeCliOpts {
   const action = parseManagedProbeAction(parseFlagValue(args, '--action') ?? parseFlagValue(args, '--type'));
+  const assets = parseManagedInlineAssetJsonFlags(args);
+  if (assets && action !== 'sync') throw new Error('--asset-json is only supported with --action sync.');
   return {
     action,
     url: parseManagedHttpUrl(parseFlagValue(args, '--url'), 'probe'),
     root: parseFlagValue(args, '--root') ? expandPath(parseFlagValue(args, '--root')!) : undefined,
+    assets,
     sourceId: parseFlagValue(args, '--source-id'),
     ensureSchema: !args.includes('--no-ensure-schema'),
     dryRun: !args.includes('--no-dry-run'),
@@ -7123,6 +7198,7 @@ function parseManagedCanary(args: string[]): ManagedCanaryCliOpts {
     action: 'sync',
     url: parseManagedHttpUrl(parseFlagValue(args, '--url'), 'canary', true)!,
     root: parseFlagValue(args, '--root') ? expandPath(parseFlagValue(args, '--root')!) : undefined,
+    assets: parseManagedInlineAssetJsonFlags(args),
     sourceId: parseFlagValue(args, '--source-id'),
     ensureSchema: !args.includes('--no-ensure-schema'),
     dryRun: !args.includes('--no-dry-run'),
@@ -7138,6 +7214,8 @@ function parseManagedCanary(args: string[]): ManagedCanaryCliOpts {
 
 export function buildManagedTriggerProbeRequest(opts: ManagedTriggerProbeOpts = {}): ManagedTriggerRequest {
   const action = opts.action ?? 'status';
+  const assets = opts.assets?.length ? opts.assets : undefined;
+  if (assets && action !== 'sync') throw new Error('managed probe inline assets are only supported with sync action.');
   const request: ManagedTriggerRequest = {
     action,
     registry: {
@@ -7149,6 +7227,7 @@ export function buildManagedTriggerProbeRequest(opts: ManagedTriggerProbeOpts = 
   if (opts.root) request.root = opts.root;
   if (action === 'sync') {
     request.trigger = opts.trigger ?? 'probe';
+    if (assets) request.assets = assets;
   }
   if (action === 'sync' || action === 'refresh-status') {
     request.aily = {
@@ -7238,6 +7317,7 @@ function managedRefreshProbeReachedTarget(probe: ManagedTriggerProbeSendResult, 
 export async function runManagedTriggerCanary(opts: {
   url: string;
   root?: string;
+  assets?: ManagedInlineAssetInput[];
   sourceId?: string;
   ensureSchema?: boolean;
   dryRun?: boolean;
@@ -7297,6 +7377,7 @@ export async function runManagedTriggerCanary(opts: {
   const syncRequest = buildManagedTriggerProbeRequest({
     action: 'sync',
     root: opts.root,
+    assets: opts.assets,
     sourceId: opts.sourceId,
     ensureSchema: opts.ensureSchema,
     dryRun: opts.dryRun,
@@ -8102,11 +8183,11 @@ COMMANDS
   managed env-check [--target status|canary|sync] [--env-file FILE] [--json]
       Check managed runtime env names without printing secret values.
 
-  managed probe [--action status|sync|refresh-status] [--root DIR] [--url URL] [--json]
+  managed probe [--action status|sync|refresh-status] [--root DIR] [--asset-json JSON] [--url URL] [--json]
       Print or POST a managed trigger status/sync/refresh-status probe.
       Sync and refresh-status probes default to dry-run.
 
-  managed canary --url URL [--root DIR] [--status-only] [--wait-status] [--json]
+  managed canary --url URL [--root DIR] [--asset-json JSON] [--status-only] [--wait-status] [--json]
       POST status, sync, refresh-status, and optionally wait for target status.
 
   managed sql-schema [--json]
@@ -8153,8 +8234,10 @@ EXAMPLES
   ${brand()} feishu managed env-check --target canary --env-file ./feishu-managed-deploy/.env.example --json
   ${brand()} feishu managed probe --action status --json
   ${brand()} feishu managed probe --action sync --root ~/rbrain-feishu --url https://example.com/trigger --json
+  ${brand()} feishu managed probe --action sync --asset-json '{"sourceUri":"https://feishu.example/doc/smoke","content":"# Smoke\\n\\nInline sample text."}' --url https://example.com/trigger --json
   ${brand()} feishu managed probe --action refresh-status --url https://example.com/trigger --json
   ${brand()} feishu managed canary --root ~/rbrain-feishu --url https://example.com/trigger --json
+  ${brand()} feishu managed canary --asset-json '{"sourceUri":"https://feishu.example/doc/smoke","content":"# Smoke\\n\\nInline sample text."}' --url https://example.com/trigger --json
   ${brand()} feishu managed canary --root ~/rbrain-feishu --url https://example.com/trigger --no-dry-run --wait-status --json
   ${brand()} feishu managed sql-schema > feishu-managed-registry.sql
   ${brand()} feishu managed provision-registry --registry-url "$${MANAGED_REGISTRY_DATABASE_URL_ENV}" --json
