@@ -347,6 +347,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('managed deploy-bundle [--out DIR]');
     expect(stdout).toContain('managed deploy-plan [--url URL]');
     expect(stdout).toContain('managed env-check [--target status|canary|sync]');
+    expect(stdout).toContain('[--source-input mirror|inline]');
     expect(stdout).toContain('managed probe [--action status|sync|refresh-status]');
     expect(stdout).toContain('managed canary --url URL');
     expect(stdout).toContain('[--asset-json JSON]');
@@ -1114,6 +1115,36 @@ describe('rbrain feishu command helpers', () => {
     expect(JSON.stringify(plan)).not.toContain('/tmp/rbrain-feishu');
   });
 
+  test('managed deploy plan supports inline source input without a mirror root', () => {
+    const plan = buildManagedDeployPlan({
+      sourceInput: 'inline',
+      url: 'https://runtime.example/trigger',
+      targetStatus: 'successful',
+      timeoutMs: 1_000,
+      intervalMs: 500,
+      env: {
+        RBRAIN_FEISHU_MANAGED_DATABASE_URL: 'postgresql://user:secret-password@example.com:5432/rbrain',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_ID: 'knowledge_space_test',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN: 'secret-token',
+      },
+    });
+
+    const envCheckStep = plan.steps.find((step) => step.id === 'env-check');
+    const productionCanary = plan.steps.find((step) => step.id === 'production-canary');
+    expect(plan.status).toBe('ready');
+    expect(plan.source_input).toBe('inline');
+    expect(plan.env_check.source_input).toBe('inline');
+    expect(plan.env_check.checks.find((check) => check.id === 'mirror_root')).toBeUndefined();
+    expect(plan.missing_required_env_keys).toEqual([]);
+    expect(envCheckStep?.command).toContain('--source-input inline');
+    expect(productionCanary?.title).toContain('inline sync canary');
+    expect(productionCanary?.command).toContain('--asset-json');
+    expect(productionCanary?.command).not.toContain('--root');
+    expect(JSON.stringify(plan)).not.toContain('secret-password');
+    expect(JSON.stringify(plan)).not.toContain('secret-token');
+    expect(JSON.stringify(plan)).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
+  });
+
   test('managed deploy plan blocks when env or trigger URL is missing', () => {
     const plan = buildManagedDeployPlan({ env: {} });
 
@@ -1181,6 +1212,56 @@ describe('rbrain feishu command helpers', () => {
     expect(proc.stdout.toString()).not.toContain('/tmp/rbrain-feishu');
   });
 
+  test('managed deploy-plan CLI can build an inline rollout without mirror env', () => {
+    const root = makeTempDir('rbrain-feishu-deploy-plan-inline-');
+    const envFile = join(root, '.env');
+    writeFileSync(envFile, [
+      'RBRAIN_FEISHU_MANAGED_DATABASE_URL=postgresql://user:secret-password@example.com:5432/rbrain',
+      'RBRAIN_AILY_KNOWLEDGE_SPACE_ID=knowledge_space_test',
+      'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=secret-token',
+      '',
+    ].join('\n'), 'utf-8');
+
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'deploy-plan',
+        '--env-file',
+        envFile,
+        '--url',
+        'https://runtime.example/trigger',
+        '--source-input',
+        'inline',
+        '--json',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: {
+        PATH: process.env.PATH ?? '',
+      },
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      status: string;
+      source_input: string;
+      missing_required_env_keys: string[];
+      steps: Array<{ id: string; status: string; command?: string }>;
+    };
+
+    expect(payload.status).toBe('ready');
+    expect(payload.source_input).toBe('inline');
+    expect(payload.missing_required_env_keys).toEqual([]);
+    expect(payload.steps.find((step) => step.id === 'production-canary')?.command).toContain('--asset-json');
+    expect(proc.stdout.toString()).not.toContain('secret-password');
+    expect(proc.stdout.toString()).not.toContain('secret-token');
+    expect(proc.stdout.toString()).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
+  });
+
   test('managed env check reports missing required runtime variables without leaking values', () => {
     const result = buildManagedEnvCheck({
       target: 'sync',
@@ -1197,6 +1278,25 @@ describe('rbrain feishu command helpers', () => {
     expect(JSON.stringify(result)).not.toContain('secret-password');
     expect(JSON.stringify(result)).not.toContain('secret-token');
     expect(JSON.stringify(result)).not.toContain('/tmp/rbrain-feishu');
+  });
+
+  test('managed env check inline source input does not require mirror root', () => {
+    const result = buildManagedEnvCheck({
+      target: 'canary',
+      sourceInput: 'inline',
+      env: {
+        RBRAIN_FEISHU_MANAGED_DATABASE_URL: 'postgresql://user:secret-password@example.com:5432/rbrain',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_ID: 'knowledge_space_test',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN: 'secret-token',
+      },
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.source_input).toBe('inline');
+    expect(result.checks.find((check) => check.id === 'mirror_root')).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('secret-password');
+    expect(JSON.stringify(result)).not.toContain('secret-token');
+    expect(JSON.stringify(result)).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
   });
 
   test('managed env check requires Aily token for canary refresh-status coverage', () => {

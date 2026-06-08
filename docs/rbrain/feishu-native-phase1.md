@@ -220,6 +220,9 @@ The local adapter:
   `rbrain feishu managed deploy-plan`, covering env readiness, registry
   provisioning, trigger deployment, canary checks, status inspection, and the
   final Aily agent answer check
+- lets `managed env-check --source-input inline` and
+  `managed deploy-plan --source-input inline` validate the online inline path
+  without requiring `RBRAIN_FEISHU_MIRROR_ROOT`
 - prints or POSTs status/sync/refresh-status trigger probes with
   `rbrain feishu managed probe` so real Miaoda deployments can be smoke-tested
   without hand-written JSON
@@ -284,7 +287,7 @@ Local tests:
 - managed env-check coverage for required variables, canary refresh-status
   token requirements, optional Base mirror pairing, and no value leakage
 - managed deploy-plan coverage for ordered rollout commands, missing config
-  blockers, env-file loading, and no secret/path leakage
+  blockers, env-file loading, inline source input, and no secret/path leakage
 - managed probe coverage for status/sync/refresh-status request generation,
   dry-run default, HTTP POST wiring, and runtime env fallback
 - managed canary coverage for status-before-sync sequencing, refresh-status
@@ -326,19 +329,21 @@ Manual platform checks:
 2. Run `managed provision-registry --registry-url ...` against the target
    Serverless PG / Miaoda table layer, adapting the generated DDL only if the
    platform rejects a Postgres feature.
-3. Run `managed deploy-plan --url ... --env-file ...` and keep its JSON output
-   as the canonical rollout checklist for the target runtime.
+3. Run `managed deploy-plan --source-input inline --url ... --env-file ...`
+   and keep its JSON output as the canonical rollout checklist for the target
+   runtime.
 4. Run the generated local server and `managed canary --url
    http://127.0.0.1:8787 --status-only` before uploading the trigger.
 5. Send one inline normalized Feishu source item through the managed trigger
    and confirm it writes an Aily asset plus registry row.
-6. Run `managed sync --registry-store postgres` against the target Serverless
-   PG connection.
+6. Optionally run `managed sync --registry-store postgres` against the target
+   Serverless PG connection as a developer fixture if mirror parity still
+   needs validation.
 7. Deploy the generated `managed deploy-bundle` output as a real
    manual/scheduled Miaoda trigger using the same registry store.
-8. Run `managed env-check --target canary`, then
-   `managed canary --url ... --no-dry-run --wait-status` or separate
-   `managed probe` status/sync/refresh-status checks.
+8. Run `managed env-check --target canary --source-input inline`, then
+   `managed canary --asset-json ... --url ... --no-dry-run --wait-status` or
+   separate `managed probe` status/sync/refresh-status checks.
 9. If the trigger canary is split into separate steps, run `managed
    wait-status` against the same registry store and verify Aily Knowledge Space
    reaches `successful` for a managed sync asset.
