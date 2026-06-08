@@ -234,12 +234,15 @@ The local adapter:
 - prints a secret-safe, ordered online rollout checklist with
   `rbrain feishu managed deploy-plan`, covering env readiness, registry
   provisioning, optional Feishu Base status table readiness, trigger
-  deployment, canary checks, status inspection, and the final Aily agent answer
-  check
+  deployment, runtime capability probing, canary checks, status inspection, and
+  the final Aily agent answer check
 - includes a deploy-plan `base-status-table` step that prints the Base field
   contract when Base is not configured, blocks partial Base env pairs, and uses
   `refresh-status` to update readable Base rows when the Base mirror is
   configured
+- adds a trigger/probe `capabilities` action that validates the deployed
+  runtime path and reports secret-safe env/registry/Base readiness before any
+  source fetch or Aily call
 - lets `managed env-check --source-input inline` and
   `managed deploy-plan --source-input inline` validate the online inline path
   without requiring `RBRAIN_FEISHU_MIRROR_ROOT`
@@ -312,8 +315,8 @@ Local tests:
 - managed deploy-plan coverage for ordered rollout commands, missing config
   blockers, optional Base status table setup/refresh states, env-file loading,
   inline source input, and no secret/path leakage
-- managed probe coverage for status/sync/refresh-status request generation,
-  dry-run default, HTTP POST wiring, and runtime env fallback
+- managed probe coverage for capabilities/status/sync/refresh-status request
+  generation, dry-run default, HTTP POST wiring, and runtime env fallback
 - managed canary coverage for status-before-sync sequencing, refresh-status
   after sync, dry-run default, wait-status polling/timeout, and skip behavior
   after status/sync failure
@@ -324,6 +327,8 @@ Manual platform checks:
   clearly names the remaining blocked environment keys.
 - The generated `feishu-managed-local-server.ts` can serve the same trigger
   locally and answer `managed canary --status-only`.
+- The deployed trigger answers `managed probe --action capabilities --url ...`
+  with env names and readiness booleans, not secret values.
 - For inline bundles, deploy-plan tells the operator to run the direct local
   function smoke, start the generated local runtime in one terminal, then
   exercise the scheduled debug route with `RBRAIN_FEISHU_INLINE_SOURCES_JSON`
@@ -355,7 +360,8 @@ Manual platform checks:
 
 ## Next Implementation Tasks
 
-1. Confirm Miaoda platform access and runtime capabilities.
+1. Confirm Miaoda platform access and runtime capabilities with
+   `managed probe --action capabilities --url ...`.
 2. Run `managed provision-registry --registry-url ...` against the target
    Serverless PG / Miaoda table layer, adapting the generated DDL only if the
    platform rejects a Postgres feature.

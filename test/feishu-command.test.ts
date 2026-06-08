@@ -49,6 +49,7 @@ import {
   buildManagedDeployBundleFiles,
   buildManagedDeployPlan,
   buildManagedInlineAssetCandidates,
+  buildManagedRuntimeCapabilities,
   buildManagedTriggerProbeRequest,
   buildMirrorReadme,
   buildMirrorGitignore,
@@ -350,7 +351,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('managed deploy-plan [--url URL]');
     expect(stdout).toContain('managed env-check [--target status|canary|sync]');
     expect(stdout).toContain('[--source-input mirror|inline]');
-    expect(stdout).toContain('managed probe [--action status|sync|refresh-status]');
+    expect(stdout).toContain('managed probe [--action capabilities|status|sync|refresh-status]');
     expect(stdout).toContain('managed canary --url URL');
     expect(stdout).toContain('[--asset-json JSON]');
     expect(stdout).toContain('[--wait-status]');
@@ -594,6 +595,56 @@ describe('rbrain feishu command helpers', () => {
     expect(result.status).toBe('ok');
     expect(statusPayload.counts.assets).toBe(1);
     expect(statusPayload.latest_sync_run?.id).toBe(seed.sync_run.id);
+  });
+
+  test('managed runtime capabilities summarize env and registry without secrets', async () => {
+    const pgUrl = 'postgresql://user:secret-password@example.com:5432/rbrain';
+    const env = {
+      RBRAIN_FEISHU_MANAGED_DATABASE_URL: pgUrl,
+      RBRAIN_AILY_KNOWLEDGE_SPACE_ID: 'knowledge_space_test',
+      RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN: 'secret-token',
+      RBRAIN_FEISHU_MANAGED_BASE_TOKEN: 'base-secret-token',
+      RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID: 'tbl_status',
+    };
+
+    const direct = buildManagedRuntimeCapabilities({
+      env,
+      registry: {
+        registryStore: 'postgres',
+        registryUrl: pgUrl,
+        registryEnsureSchema: true,
+      },
+    });
+    const result = await runManagedTrigger({
+      request: {
+        action: 'capabilities',
+        registry: {
+          store: 'postgres',
+          url: pgUrl,
+          ensureSchema: true,
+        },
+      },
+      env,
+    });
+
+    expect(direct.status).toBe('ok');
+    expect(direct.registry).toEqual({
+      store: 'postgres',
+      url_present: true,
+      ensure_schema: true,
+    });
+    expect(direct.env.present).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
+    expect(direct.env.present).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN');
+    expect(direct.env.base_status_table).toBe('configured');
+    expect(direct.features).toContain('inline_canary_ready');
+    expect(direct.features).toContain('base_status_table');
+    expect(result.action).toBe('capabilities');
+    expect(result.status).toBe('ok');
+    expect(JSON.stringify(result)).not.toContain('secret-password');
+    expect(JSON.stringify(result)).not.toContain(pgUrl);
+    expect(JSON.stringify(result)).not.toContain('secret-token');
+    expect(JSON.stringify(result)).not.toContain('base-secret-token');
+    expect(JSON.stringify(result)).not.toContain('tbl_status');
   });
 
   test('managed trigger can run dry-run sync for a server function', async () => {
@@ -915,6 +966,42 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.result.sync_run.assets_seen).toBe(2);
   });
 
+  test('managed trigger HTTP handler returns capabilities without root or secret values', async () => {
+    const pgUrl = 'postgresql://user:secret-password@example.com:5432/rbrain';
+    const response = await handleManagedTriggerRequest({
+      request: {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'capabilities',
+          registry: {
+            store: 'postgres',
+            url: pgUrl,
+            ensureSchema: true,
+          },
+        }),
+      },
+      env: {
+        RBRAIN_FEISHU_MANAGED_DATABASE_URL: pgUrl,
+        RBRAIN_AILY_KNOWLEDGE_SPACE_ID: 'knowledge_space_test',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN: 'secret-token',
+      },
+    });
+    const payload = JSON.parse(response.body) as {
+      action: string;
+      status: string;
+      result: { registry: { url_present: boolean }; env: { present: string[] } };
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.action).toBe('capabilities');
+    expect(payload.status).toBe('ok');
+    expect(payload.result.registry.url_present).toBe(true);
+    expect(payload.result.env.present).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN');
+    expect(response.body).not.toContain(pgUrl);
+    expect(response.body).not.toContain('secret-password');
+    expect(response.body).not.toContain('secret-token');
+  });
+
   test('managed trigger HTTP handler rejects non-POST methods and redacts errors', async () => {
     const methodResponse = await handleManagedTriggerRequest({
       request: { method: 'GET' },
@@ -956,9 +1043,11 @@ describe('rbrain feishu command helpers', () => {
     expect(template).toContain('function runtimeEnv(envOverride?: Env)');
     expect(template).toContain('if (envOverride) return envOverride');
     expect(template).toContain('export default async function handler(request: Request, envOverride?: Env)');
+    expect(template).toContain('export async function capabilities(envOverride?: Env)');
     expect(template).toContain('export async function scheduled(envOverride?: Env)');
     expect(template).toContain('export async function status(envOverride?: Env)');
     expect(template).toContain('export async function refreshStatus(envOverride?: Env)');
+    expect(template).toContain("action: 'capabilities'");
     expect(template).toContain("action: 'refresh-status'");
     expect(template).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
     expect(template).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_ID');
@@ -1078,14 +1167,16 @@ describe('rbrain feishu command helpers', () => {
     ]);
     expect(byPath.get('feishu-managed-trigger.ts')).toContain('from "gbrain/feishu-managed"');
     expect(byPath.get('feishu-managed-trigger.ts')).toContain('envOverride?: Env');
-    expect(byPath.get('feishu-managed-local-server.ts')).toContain("import handler, { refreshStatus, scheduled, status } from './feishu-managed-trigger.ts'");
+    expect(byPath.get('feishu-managed-local-server.ts')).toContain("import handler, { capabilities, refreshStatus, scheduled, status } from './feishu-managed-trigger.ts'");
     expect(byPath.get('feishu-managed-local-server.ts')).toContain('Bun.serve');
     expect(byPath.get('feishu-managed-local-server.ts')).toContain('/__rbrain/status');
     expect(byPath.get('feishu-managed-local-server.ts')).toContain('/__rbrain/scheduled');
+    expect(byPath.get('feishu-managed-local-server.ts')).toContain('/__rbrain/capabilities');
     expect(byPath.get('feishu-managed-local-server.ts')).toContain('/__rbrain/refresh-status');
     expect(byPath.get('feishu-managed-local-server.ts')).not.toContain('feishu-inline-fetcher.example.ts');
     expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(byPath.get('feishu-managed-local-server.ts') ?? '')).not.toThrow();
-    expect(byPath.get('feishu-managed-local-smoke.ts')).toContain("import { status } from './feishu-managed-trigger.ts'");
+    expect(byPath.get('feishu-managed-local-smoke.ts')).toContain("import { capabilities, status } from './feishu-managed-trigger.ts'");
+    expect(byPath.get('feishu-managed-local-smoke.ts')).toContain("await assertOkResponse('capabilities', await capabilities())");
     expect(byPath.get('feishu-managed-local-smoke.ts')).toContain("await assertOkResponse('status', await status())");
     expect(byPath.get('feishu-managed-local-smoke.ts')).not.toContain('scheduled');
     expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(byPath.get('feishu-managed-local-smoke.ts') ?? '')).not.toThrow();
@@ -1108,6 +1199,7 @@ describe('rbrain feishu command helpers', () => {
     expect(byPath.get('README.md')).toContain('status probe');
     expect(byPath.get('README.md')).toContain('managed deploy-plan');
     expect(byPath.get('README.md')).toContain('managed canary');
+    expect(byPath.get('README.md')).toContain('capabilities');
     expect(byPath.get('README.md')).toContain('feishu-managed-local-smoke.ts');
     expect(byPath.get('README.md')).toContain('handler(request, env)');
     expect(byPath.get('README.md')).toContain('bun run smoke:local');
@@ -1141,9 +1233,12 @@ describe('rbrain feishu command helpers', () => {
     expect(byPath.get('feishu-managed-trigger.ts')).toContain('runtime_env_bound');
     expect(byPath.get('feishu-managed-trigger.ts')).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
     expect(byPath.get('feishu-managed-local-server.ts')).toContain("import './feishu-inline-fetcher.example.ts'");
+    expect(byPath.get('feishu-managed-local-server.ts')).toContain('/__rbrain/capabilities');
     expect(byPath.get('feishu-managed-local-server.ts')).toContain('/__rbrain/scheduled');
     expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(byPath.get('feishu-managed-local-server.ts') ?? '')).not.toThrow();
     expect(byPath.get('feishu-managed-local-smoke.ts')).toContain("import './feishu-inline-fetcher.example.ts'");
+    expect(byPath.get('feishu-managed-local-smoke.ts')).toContain("import { capabilities, scheduled, status } from './feishu-managed-trigger.ts'");
+    expect(byPath.get('feishu-managed-local-smoke.ts')).toContain("await assertOkResponse('capabilities', await capabilities())");
     expect(byPath.get('feishu-managed-local-smoke.ts')).toContain("await assertOkResponse('scheduled', await scheduled(), { rejectSkipped: true })");
     expect(byPath.get('feishu-managed-local-smoke.ts')).toContain('RBRAIN_FEISHU_INLINE_SOURCES_JSON');
     expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(byPath.get('feishu-managed-local-smoke.ts') ?? '')).not.toThrow();
@@ -1337,6 +1432,7 @@ describe('rbrain feishu command helpers', () => {
       'local-function-smoke',
       'start-local-runtime',
       'local-smoke',
+      'runtime-capabilities',
       'status-canary',
       'production-canary',
       'inspect-registry',
@@ -1359,7 +1455,12 @@ describe('rbrain feishu command helpers', () => {
       status: 'manual',
       depends_on: ['start-local-runtime'],
     });
-    expect(plan.steps.find((step) => step.id === 'status-canary')?.depends_on).toEqual(['local-smoke']);
+    expect(plan.steps.find((step) => step.id === 'runtime-capabilities')).toMatchObject({
+      status: 'ready',
+      depends_on: ['local-smoke'],
+    });
+    expect(plan.steps.find((step) => step.id === 'runtime-capabilities')?.command).toContain('--action capabilities');
+    expect(plan.steps.find((step) => step.id === 'status-canary')?.depends_on).toEqual(['runtime-capabilities']);
     expect(plan.steps.find((step) => step.id === 'start-local-runtime')?.command).toContain('bun run start');
     expect(plan.steps.find((step) => step.id === 'production-canary')?.command).toContain('--wait-status');
     expect(plan.steps.find((step) => step.id === 'production-canary')?.command).toContain('--timeout-ms 1000');
@@ -1407,6 +1508,7 @@ describe('rbrain feishu command helpers', () => {
     expect(localSmoke?.title).toContain('inline scheduled smoke');
     expect(localSmoke?.command).toContain('/__rbrain/scheduled');
     expect(localSmoke?.command).toContain('curl -fsS');
+    expect(plan.steps.find((step) => step.id === 'runtime-capabilities')?.command).toContain('--action capabilities');
     expect(productionCanary?.title).toContain('inline sync canary');
     expect(productionCanary?.command).toContain('--asset-json');
     expect(productionCanary?.command).not.toContain('--root');
@@ -1437,6 +1539,9 @@ describe('rbrain feishu command helpers', () => {
       status: 'blocked',
     });
     expect(plan.steps.find((step) => step.id === 'local-function-smoke')).toMatchObject({
+      status: 'blocked',
+    });
+    expect(plan.steps.find((step) => step.id === 'runtime-capabilities')).toMatchObject({
       status: 'blocked',
     });
   });
@@ -1537,6 +1642,7 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.steps.find((step) => step.id === 'local-function-smoke')?.command).toContain('bun run smoke:local');
     expect(payload.steps.find((step) => step.id === 'start-local-runtime')?.command).toContain('bun run start');
     expect(payload.steps.find((step) => step.id === 'local-smoke')?.command).toContain('http://127.0.0.1:8787');
+    expect(payload.steps.find((step) => step.id === 'runtime-capabilities')?.command).toContain('--action capabilities');
     expect(payload.steps.find((step) => step.id === 'production-canary')?.command).toContain('--wait-status');
     expect(proc.stdout.toString()).not.toContain('secret-password');
     expect(proc.stdout.toString()).not.toContain('secret-token');
@@ -1591,6 +1697,7 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.steps.find((step) => step.id === 'local-function-smoke')?.command).toContain('bun run smoke:local');
     expect(payload.steps.find((step) => step.id === 'start-local-runtime')?.command).toContain('bun run start');
     expect(payload.steps.find((step) => step.id === 'local-smoke')?.command).toContain('/__rbrain/scheduled');
+    expect(payload.steps.find((step) => step.id === 'runtime-capabilities')?.command).toContain('--action capabilities');
     expect(payload.steps.find((step) => step.id === 'production-canary')?.command).toContain('--asset-json');
     expect(proc.stdout.toString()).not.toContain('secret-password');
     expect(proc.stdout.toString()).not.toContain('secret-token');
@@ -1759,6 +1866,15 @@ describe('rbrain feishu command helpers', () => {
   });
 
   test('managed probe builds safe status and dry-run sync requests', () => {
+    const capabilitiesProbe = buildManagedTriggerProbeRequest({ action: 'capabilities' });
+    expect(capabilitiesProbe).toEqual({
+      action: 'capabilities',
+      registry: {
+        store: 'postgres',
+        ensureSchema: true,
+      },
+    });
+
     const statusProbe = buildManagedTriggerProbeRequest({ action: 'status' });
     expect(statusProbe).toEqual({
       action: 'status',
@@ -1832,7 +1948,7 @@ describe('rbrain feishu command helpers', () => {
   });
 
   test('managed probe can POST a request with JSON headers', async () => {
-    const request = buildManagedTriggerProbeRequest({ action: 'status' });
+    const request = buildManagedTriggerProbeRequest({ action: 'capabilities' });
     let postedUrl = '';
     let postedBody = '';
     let postedContentType = '';
@@ -1843,7 +1959,7 @@ describe('rbrain feishu command helpers', () => {
         postedUrl = String(url);
         postedBody = String(init?.body ?? '');
         postedContentType = String((init?.headers as Record<string, string>)['content-type'] ?? '');
-        return new Response(JSON.stringify({ action: 'status', status: 'ok' }), {
+        return new Response(JSON.stringify({ action: 'capabilities', status: 'ok' }), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
@@ -1855,7 +1971,7 @@ describe('rbrain feishu command helpers', () => {
     expect(JSON.parse(postedBody)).toEqual(request);
     expect(result.status).toBe('ok');
     expect(result.response.status).toBe(200);
-    expect(result.response.json).toEqual({ action: 'status', status: 'ok' });
+    expect(result.response.json).toEqual({ action: 'capabilities', status: 'ok' });
   });
 
   test('managed probe redacts Postgres URLs from remote response bodies', async () => {
@@ -2091,6 +2207,39 @@ describe('rbrain feishu command helpers', () => {
       name: 'refresh-status',
       status: 'skipped',
       reason: 'sync probe failed',
+    });
+  });
+
+  test('managed probe CLI previews a capabilities request', () => {
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'probe',
+        '--action',
+        'capabilities',
+        '--json',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      status: string;
+      request: {
+        action: string;
+        registry: { store: string; ensureSchema: boolean };
+      };
+    };
+
+    expect(payload.status).toBe('preview');
+    expect(payload.request).toEqual({
+      action: 'capabilities',
+      registry: { store: 'postgres', ensureSchema: true },
     });
   });
 
