@@ -280,14 +280,14 @@ sync or `--no-dry-run`.
 `managed deploy-plan` reuses the canary env check, then prints an ordered,
 secret-safe sequence for registry provisioning, optional Feishu Base status
 table preparation, trigger deployment, status-only local function smoke, local
-runtime startup, local HTTP smoke, deployed status-only canary, production
-canary with `--wait-status`, registry inspection, and the final Aily
-custom-agent answer check. When both Base status mirror variables are present,
-the Base step points at `managed refresh-status` so the readable governance row
-can be updated from registry/Aily state without a second content upload. In
-`--source-input inline` mode the generated deploy-bundle command keeps
-the same source-input flag, so the bundle includes the inline fetcher example
-and local scheduled
+runtime startup, local HTTP smoke, deployed runtime capabilities probe,
+deployed status-only canary, production canary with `--wait-status`, registry
+inspection, and the final Aily custom-agent answer check. When both Base status
+mirror variables are present, the Base step points at `managed refresh-status`
+so the readable governance row can be updated from registry/Aily state without
+a second content upload. In `--source-input inline` mode the generated
+deploy-bundle command keeps the same source-input flag, so the bundle includes
+the inline fetcher example and local scheduled
 debug route before upload. If `RBRAIN_FEISHU_INLINE_SOURCES_JSON` is not set,
 env-check warns rather than blocking because production fetchers can replace
 that local sample env with tenant Feishu API calls.
@@ -300,12 +300,14 @@ cd ./feishu-managed-deploy
 bun install
 bun run smoke:local
 bun run start
+rbrain feishu managed probe --action capabilities --url http://127.0.0.1:8787/__rbrain/capabilities --json
 rbrain feishu managed canary --url http://127.0.0.1:8787 --status-only --json
 ```
 
 Before or after deployment, generate the exact probe bodies:
 
 ```bash
+rbrain feishu managed probe --action capabilities --json
 rbrain feishu managed probe --action status --json
 rbrain feishu managed probe --action sync --root ~/rbrain-feishu --json
 rbrain feishu managed probe --action sync \
@@ -320,6 +322,7 @@ Aily's latest state without writing the registry/Base rows. Use `--no-dry-run`
 only after the status probe is healthy:
 
 ```bash
+rbrain feishu managed probe --action capabilities --url https://example.com/trigger --json
 rbrain feishu managed probe --action status --url https://example.com/trigger --json
 rbrain feishu managed probe --action sync --root ~/rbrain-feishu --url https://example.com/trigger --json
 rbrain feishu managed probe --action sync \
@@ -332,6 +335,12 @@ rbrain feishu managed wait-status \
   --space-id "$RBRAIN_AILY_KNOWLEDGE_SPACE_ID" \
   --json
 ```
+
+The capabilities probe does not fetch source content or call Aily. It confirms
+that the deployed trigger can execute, shows only bound environment variable
+names, reports whether the registry URL is present without printing it, and
+compares mirror and inline canary readiness. Use it first when validating
+Miaoda/server-function runtime access.
 
 For a one-command deployment canary, run status first, then dry-run sync, then
 refresh-status:

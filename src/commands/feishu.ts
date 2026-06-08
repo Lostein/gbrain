@@ -6000,7 +6000,7 @@ export async function runManagedSyncJob(input: ManagedSyncJobInput) {
   }
 }
 
-export type ManagedTriggerAction = 'status' | 'sync' | 'refresh-status';
+export type ManagedTriggerAction = 'capabilities' | 'status' | 'sync' | 'refresh-status';
 
 export interface ManagedTriggerRequest {
   action?: ManagedTriggerAction;
@@ -6159,6 +6159,25 @@ export interface ManagedDeployPlanResult {
   notes: string[];
 }
 
+export interface ManagedRuntimeCapabilitiesResult {
+  status: 'ok' | 'warn';
+  registry: {
+    store: ManagedRegistryStoreKind;
+    url_present: boolean;
+    ensure_schema: boolean;
+  };
+  env: {
+    present: string[];
+    base_status_table: 'configured' | 'partial' | 'not_configured';
+  };
+  checks: {
+    mirror_canary: ManagedEnvCheckResult;
+    inline_canary: ManagedEnvCheckResult;
+  };
+  features: string[];
+  next_steps: string[];
+}
+
 export interface ManagedTriggerProbeSendResult {
   status: 'ok' | 'error';
   url: string;
@@ -6254,6 +6273,14 @@ export async function runManagedTrigger(input: ManagedTriggerInput = {}) {
   const env = input.env ?? process.env;
   const action = request.action ?? 'status';
   const registry = resolveManagedTriggerRegistry({ request, env });
+  if (action === 'capabilities') {
+    const payload = buildManagedRuntimeCapabilities({ env, registry });
+    return {
+      action,
+      status: payload.status,
+      result: payload,
+    };
+  }
   const inlineAssetsRaw = (request as { assets?: unknown }).assets;
   const inlineAssets = inlineAssetsRaw === undefined
     ? undefined
@@ -6262,6 +6289,9 @@ export async function runManagedTrigger(input: ManagedTriggerInput = {}) {
         allowSingle: false,
         allowEmpty: true,
       });
+  if (inlineAssets && action !== 'sync') {
+    throw new Error(`managed trigger ${action} does not accept inline assets.`);
+  }
   const root = resolveManagedTriggerRoot({ action, request, env, registryStore: registry.registryStore });
   const sourceId = request.sourceId ?? 'feishu';
 
@@ -6555,6 +6585,21 @@ export default async function handler(request: Request, envOverride?: Env): Prom
   return toWebResponse(response);
 }
 
+export async function capabilities(envOverride?: Env): Promise<Response> {
+  const env = runtimeEnv(envOverride);
+  const response = await handleManagedTriggerRequest({
+    request: {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'capabilities',
+        registry: postgresRegistry(env),
+      }),
+    },
+    env,
+  });
+  return toWebResponse(response);
+}
+
 ${scheduledBody}
 
 export async function status(envOverride?: Env): Promise<Response> {
@@ -6684,7 +6729,7 @@ function buildManagedDeployLocalServer(opts: { sourceInput?: ManagedSourceInputM
     ? `import './feishu-inline-fetcher.example.ts';
 `
     : '';
-  return `import handler, { refreshStatus, scheduled, status } from './feishu-managed-trigger.ts';
+  return `import handler, { capabilities, refreshStatus, scheduled, status } from './feishu-managed-trigger.ts';
 ${inlineFetcherImport}
 
 const rawPort = process.env.PORT ?? process.env.RBRAIN_FEISHU_MANAGED_PORT ?? '8787';
@@ -6702,6 +6747,7 @@ Bun.serve({
   port,
   async fetch(request) {
     const route = localDebugRoute(request);
+    if (route === '/__rbrain/capabilities') return capabilities();
     if (route === '/__rbrain/status') return status();
     if (route === '/__rbrain/scheduled') return scheduled();
     if (route === '/__rbrain/refresh-status') return refreshStatus();
@@ -6710,7 +6756,7 @@ Bun.serve({
 });
 
 console.log(\`RBrain Feishu managed runtime listening on http://127.0.0.1:\${port}\`);
-console.log('Local debug routes: /__rbrain/status, /__rbrain/scheduled, /__rbrain/refresh-status');
+console.log('Local debug routes: /__rbrain/capabilities, /__rbrain/status, /__rbrain/scheduled, /__rbrain/refresh-status');
 `;
 }
 
@@ -6718,9 +6764,9 @@ function buildManagedDeployLocalSmoke(opts: { sourceInput?: ManagedSourceInputMo
   const sourceInput = opts.sourceInput ?? 'mirror';
   const imports = sourceInput === 'inline'
     ? `import './feishu-inline-fetcher.example.ts';
-import { scheduled, status } from './feishu-managed-trigger.ts';
+import { capabilities, scheduled, status } from './feishu-managed-trigger.ts';
 `
-    : `import { status } from './feishu-managed-trigger.ts';
+    : `import { capabilities, status } from './feishu-managed-trigger.ts';
 `;
   const scheduledSmoke = sourceInput === 'inline'
     ? `
@@ -6766,6 +6812,7 @@ async function assertOkResponse(
 }
 
 async function main(): Promise<void> {
+  await assertOkResponse('capabilities', await capabilities());
   await assertOkResponse('status', await status());${scheduledSmoke}
 }
 
@@ -6941,14 +6988,16 @@ ${inlineRuntimeNote}
 
 ## Files
 
-- \`feishu-managed-trigger.ts\`: HTTP, scheduled sync, status, and
-  refresh-status entrypoints.
+- \`feishu-managed-trigger.ts\`: HTTP, capabilities, scheduled sync, status,
+  and refresh-status entrypoints.
   It imports \`handleManagedTriggerRequest\` from \`${opts.importSpecifier}\`.
 ${inlineFetcherFile}- \`feishu-managed-local-server.ts\`: local Bun HTTP server for deployment
   smoke tests before uploading the trigger to a platform. It also exposes
-  local debug routes for \`status\`, \`scheduled\`, and \`refresh-status\`.
+  local debug routes for \`capabilities\`, \`status\`, \`scheduled\`, and
+  \`refresh-status\`.
 - \`feishu-managed-local-smoke.ts\`: direct local function smoke test for the
-  generated status entrypoint and, in inline mode, the scheduled fetcher path.
+  generated capabilities/status entrypoints and, in inline mode, the scheduled
+  fetcher path.
 - \`feishu-managed-registry.sql\`: Postgres DDL for managed sources, assets,
   and sync runs.
 - \`package.json\`: runtime dependency manifest that installs the package
@@ -6983,6 +7032,7 @@ rbrain feishu managed deploy-plan${sourceInputArgs} --url https://your-runtime.e
 bun install
 bun run smoke:local
 bun run start
+rbrain feishu managed probe --action capabilities --url http://127.0.0.1:8787/__rbrain/capabilities --json
 rbrain feishu managed canary --url http://127.0.0.1:8787 --status-only --json
 rbrain feishu managed probe --action status --url http://127.0.0.1:8787/__rbrain/status --json
 \`\`\`
@@ -6990,9 +7040,11 @@ ${inlineLocalSmokeNote}
 
 6. Deploy \`feishu-managed-trigger.ts\` as the HTTP/manual and scheduled
    server-function entrypoint.
-7. Run a status probe before enabling a full sync:
+7. Run a capabilities probe, then a status probe, before enabling a full sync:
 
 \`\`\`bash
+rbrain feishu managed probe --action capabilities --json
+rbrain feishu managed probe --action capabilities --url https://your-runtime.example/trigger --json
 rbrain feishu managed probe --action status --json
 rbrain feishu managed probe --action status --url https://your-runtime.example/trigger --json
 rbrain feishu managed canary --url https://your-runtime.example/trigger --status-only --json
@@ -7020,9 +7072,9 @@ The generated trigger accepts POST JSON shaped like \`ManagedTriggerRequest\`.
 It returns JSON with \`action\`, \`status\`, and \`result\`. Errors redact
 database URLs and known token env values before returning the response body.
 Server-function platforms can pass env/bindings as the second argument to
-\`handler(request, env)\`, \`scheduled(env)\`, \`status(env)\`, and
-\`refreshStatus(env)\`. Local Bun smoke tests omit that argument and read
-\`process.env\` instead.
+\`handler(request, env)\`, \`capabilities(env)\`, \`scheduled(env)\`,
+\`status(env)\`, and \`refreshStatus(env)\`. Local Bun smoke tests omit that
+argument and read \`process.env\` instead.
 Inline scheduled sync calls the registered \`InlineAssetFetcher\`. Without one,
 it returns \`manual_required\` instead of trying to guess platform-specific
 Feishu fetch behavior.
@@ -7316,6 +7368,80 @@ export function buildManagedEnvCheck(opts: {
   };
 }
 
+function managedRuntimeKnownEnvKeys(): string[] {
+  return Array.from(new Set([
+    ...MANAGED_TRIGGER_TEMPLATE_ENV,
+    MANAGED_BASE_AS_ENV,
+    MANAGED_INLINE_SOURCES_JSON_ENV,
+    MANAGED_REGISTRY_STORE_ENV,
+    AILY_FALLBACK_SPACE_ID_ENV,
+    AILY_FALLBACK_TOKEN_ENV,
+  ])).sort();
+}
+
+function managedRuntimeBaseStatus(check: ManagedEnvCheckItem | undefined): ManagedRuntimeCapabilitiesResult['env']['base_status_table'] {
+  if (!check || check.present.length === 0) return 'not_configured';
+  return check.status === 'warn' ? 'partial' : 'configured';
+}
+
+function managedRuntimeMissingRequired(result: ManagedEnvCheckResult): string[] {
+  return result.checks
+    .filter((check) => check.required && check.status === 'missing')
+    .flatMap((check) => check.keys);
+}
+
+export function buildManagedRuntimeCapabilities(opts: {
+  env?: EnvLookup;
+  registry?: Pick<ManagedRegistryStatusOpts, 'registryStore' | 'registryUrl' | 'registryEnsureSchema'>;
+} = {}): ManagedRuntimeCapabilitiesResult {
+  const env = opts.env ?? process.env;
+  const registry = opts.registry ?? resolveManagedTriggerRegistry({ env });
+  const mirrorCanary = buildManagedEnvCheck({ env, target: 'canary', sourceInput: 'mirror' });
+  const inlineCanary = buildManagedEnvCheck({ env, target: 'canary', sourceInput: 'inline' });
+  const baseCheck = mirrorCanary.checks.find((check) => check.id === 'base_status_table');
+  const baseStatus = managedRuntimeBaseStatus(baseCheck);
+  const present = managedRuntimeKnownEnvKeys().filter((key) => hasEnvValue(env, key));
+  const mirrorReady = mirrorCanary.status !== 'fail';
+  const inlineReady = inlineCanary.status !== 'fail';
+  const features = [
+    'http_trigger',
+    registry.registryStore === 'postgres' && registry.registryUrl ? 'postgres_registry' : 'json_registry',
+    inlineReady ? 'inline_canary_ready' : 'inline_canary_blocked',
+    mirrorReady ? 'mirror_canary_ready' : 'mirror_canary_blocked',
+    baseStatus === 'configured' ? 'base_status_table' : undefined,
+  ].filter((feature): feature is string => Boolean(feature));
+  const nextSteps: string[] = [];
+  const mirrorMissing = managedRuntimeMissingRequired(mirrorCanary);
+  const inlineMissing = managedRuntimeMissingRequired(inlineCanary);
+  if (mirrorMissing.length > 0) nextSteps.push(`Mirror canary missing: ${mirrorMissing.join(', ')}.`);
+  if (inlineMissing.length > 0) nextSteps.push(`Inline canary missing: ${inlineMissing.join(', ')}.`);
+  if (baseStatus === 'partial') {
+    nextSteps.push(`Complete or remove ${MANAGED_BASE_TOKEN_ENV} and ${MANAGED_BASE_TABLE_ID_ENV}.`);
+  }
+  if (!registry.registryUrl && registry.registryStore === 'postgres') {
+    nextSteps.push(`Set ${MANAGED_REGISTRY_DATABASE_URL_ENV} before using the Postgres registry.`);
+  }
+
+  return {
+    status: (mirrorReady || inlineReady) && baseStatus !== 'partial' ? 'ok' : 'warn',
+    registry: {
+      store: registry.registryStore,
+      url_present: Boolean(registry.registryUrl),
+      ensure_schema: registry.registryEnsureSchema,
+    },
+    env: {
+      present,
+      base_status_table: baseStatus,
+    },
+    checks: {
+      mirror_canary: mirrorCanary,
+      inline_canary: inlineCanary,
+    },
+    features,
+    next_steps: nextSteps,
+  };
+}
+
 function shellArg(value: string): string {
   return JSON.stringify(value);
 }
@@ -7471,12 +7597,20 @@ export function buildManagedDeployPlan(opts: {
       depends_on: ['start-local-runtime'],
     }),
     managedDeployStep({
+      id: 'runtime-capabilities',
+      title: 'Probe deployed runtime capabilities and bound env names',
+      status: opts.url ? 'ready' : 'blocked',
+      command: `rbrain feishu managed probe --action capabilities --url ${triggerUrlArg} --json`,
+      reason: missingUrlReason,
+      depends_on: ['local-smoke'],
+    }),
+    managedDeployStep({
       id: 'status-canary',
       title: 'Probe deployed trigger and Serverless PG connectivity',
       status: canRunRemote ? 'ready' : 'blocked',
       command: `rbrain feishu managed canary --url ${triggerUrlArg} --status-only --json`,
       reason: missingEnvReason ?? missingUrlReason,
-      depends_on: ['local-smoke'],
+      depends_on: ['runtime-capabilities'],
     }),
     managedDeployStep({
       id: 'production-canary',
@@ -7576,9 +7710,10 @@ function printManagedEnvCheckResult(payload: ManagedEnvCheckResult, json: boolea
 
 function parseManagedProbeAction(input: string | undefined): ManagedTriggerAction {
   if (input === undefined || input === 'status') return 'status';
+  if (input === 'capabilities') return 'capabilities';
   if (input === 'sync') return 'sync';
   if (input === 'refresh-status') return 'refresh-status';
-  throw new Error(`--action must be one of status, sync, refresh-status`);
+  throw new Error(`--action must be one of capabilities, status, sync, refresh-status`);
 }
 
 function parseManagedHttpUrl(raw: string | undefined, command: string, required = false): string | undefined {
@@ -8692,8 +8827,8 @@ COMMANDS
   managed env-check [--target status|canary|sync] [--source-input mirror|inline] [--env-file FILE] [--json]
       Check managed runtime env names without printing secret values.
 
-  managed probe [--action status|sync|refresh-status] [--root DIR] [--asset-json JSON] [--url URL] [--json]
-      Print or POST a managed trigger status/sync/refresh-status probe.
+  managed probe [--action capabilities|status|sync|refresh-status] [--root DIR] [--asset-json JSON] [--url URL] [--json]
+      Print or POST a managed trigger capabilities/status/sync/refresh-status probe.
       Sync and refresh-status probes default to dry-run.
 
   managed canary --url URL [--root DIR] [--asset-json JSON] [--status-only] [--wait-status] [--json]
@@ -8745,6 +8880,7 @@ EXAMPLES
   ${brand()} feishu managed deploy-plan --source-input inline --url https://example.com/trigger --json
   ${brand()} feishu managed env-check --target canary --env-file ./feishu-managed-deploy/.env.example --json
   ${brand()} feishu managed env-check --target canary --source-input inline --json
+  ${brand()} feishu managed probe --action capabilities --json
   ${brand()} feishu managed probe --action status --json
   ${brand()} feishu managed probe --action sync --root ~/rbrain-feishu --url https://example.com/trigger --json
   ${brand()} feishu managed probe --action sync --asset-json '{"sourceUri":"https://feishu.example/doc/smoke","content":"# Smoke\\n\\nInline sample text."}' --url https://example.com/trigger --json
