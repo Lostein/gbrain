@@ -1332,6 +1332,7 @@ describe('rbrain feishu command helpers', () => {
     expect(plan.steps.map((step) => step.id)).toEqual([
       'env-check',
       'provision-registry',
+      'base-status-table',
       'deploy-trigger',
       'local-function-smoke',
       'start-local-runtime',
@@ -1341,6 +1342,12 @@ describe('rbrain feishu command helpers', () => {
       'inspect-registry',
       'agent-answer-check',
     ]);
+    expect(plan.steps.find((step) => step.id === 'base-status-table')).toMatchObject({
+      status: 'manual',
+      depends_on: ['provision-registry'],
+    });
+    expect(plan.steps.find((step) => step.id === 'base-status-table')?.command).toContain('base-template');
+    expect(plan.steps.find((step) => step.id === 'base-status-table')?.reason).toContain('provision-base');
     expect(plan.steps.find((step) => step.id === 'deploy-trigger')?.command).not.toContain('--source-input inline');
     expect(plan.steps.find((step) => step.id === 'local-function-smoke')).toMatchObject({
       status: 'manual',
@@ -1377,6 +1384,7 @@ describe('rbrain feishu command helpers', () => {
 
     const envCheckStep = plan.steps.find((step) => step.id === 'env-check');
     const deployTrigger = plan.steps.find((step) => step.id === 'deploy-trigger');
+    const baseStatusTable = plan.steps.find((step) => step.id === 'base-status-table');
     const localFunctionSmoke = plan.steps.find((step) => step.id === 'local-function-smoke');
     const startLocalRuntime = plan.steps.find((step) => step.id === 'start-local-runtime');
     const localSmoke = plan.steps.find((step) => step.id === 'local-smoke');
@@ -1387,6 +1395,11 @@ describe('rbrain feishu command helpers', () => {
     expect(plan.env_check.checks.find((check) => check.id === 'mirror_root')).toBeUndefined();
     expect(plan.missing_required_env_keys).toEqual([]);
     expect(envCheckStep?.command).toContain('--source-input inline');
+    expect(baseStatusTable).toMatchObject({
+      status: 'manual',
+      depends_on: ['provision-registry'],
+    });
+    expect(baseStatusTable?.command).toContain('base-template');
     expect(deployTrigger?.command).toContain('deploy-bundle --source-input inline');
     expect(localFunctionSmoke?.title).toContain('inline scheduled function smoke');
     expect(localFunctionSmoke?.command).toContain('bun run smoke:local');
@@ -1426,6 +1439,58 @@ describe('rbrain feishu command helpers', () => {
     expect(plan.steps.find((step) => step.id === 'local-function-smoke')).toMatchObject({
       status: 'blocked',
     });
+  });
+
+  test('managed deploy plan blocks when optional Base status mirror env is incomplete', () => {
+    const plan = buildManagedDeployPlan({
+      url: 'https://runtime.example/trigger',
+      env: {
+        RBRAIN_FEISHU_MANAGED_DATABASE_URL: 'postgresql://user:secret-password@example.com:5432/rbrain',
+        RBRAIN_FEISHU_MIRROR_ROOT: '/tmp/rbrain-feishu',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_ID: 'knowledge_space_test',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN: 'secret-token',
+        RBRAIN_FEISHU_MANAGED_BASE_TOKEN: 'base-secret-token',
+      },
+    });
+
+    const baseStatusTable = plan.steps.find((step) => step.id === 'base-status-table');
+    expect(plan.status).toBe('blocked');
+    expect(plan.env_check.status).toBe('warn');
+    expect(baseStatusTable).toMatchObject({
+      status: 'blocked',
+      depends_on: ['provision-registry'],
+    });
+    expect(baseStatusTable?.command).toContain('base-template');
+    expect(baseStatusTable?.reason).toContain('RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID');
+    expect(JSON.stringify(plan)).not.toContain('base-secret-token');
+  });
+
+  test('managed deploy plan uses configured Base status mirror without leaking values', () => {
+    const plan = buildManagedDeployPlan({
+      url: 'https://runtime.example/trigger',
+      env: {
+        RBRAIN_FEISHU_MANAGED_DATABASE_URL: 'postgresql://user:secret-password@example.com:5432/rbrain',
+        RBRAIN_FEISHU_MIRROR_ROOT: '/tmp/rbrain-feishu',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_ID: 'knowledge_space_test',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN: 'secret-token',
+        RBRAIN_FEISHU_MANAGED_BASE_TOKEN: 'base-secret-token',
+        RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID: 'tbl_status',
+      },
+    });
+
+    const baseStatusTable = plan.steps.find((step) => step.id === 'base-status-table');
+    expect(plan.status).toBe('ready');
+    expect(plan.env_check.status).toBe('ok');
+    expect(baseStatusTable).toMatchObject({
+      status: 'ready',
+      depends_on: ['provision-registry'],
+    });
+    expect(baseStatusTable?.command).toContain('managed refresh-status');
+    expect(baseStatusTable?.command).toContain('--base-token "$RBRAIN_FEISHU_MANAGED_BASE_TOKEN"');
+    expect(baseStatusTable?.command).toContain('--base-table-id "$RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID"');
+    expect(baseStatusTable?.reason).toContain('without re-uploading unchanged assets');
+    expect(JSON.stringify(plan)).not.toContain('base-secret-token');
+    expect(JSON.stringify(plan)).not.toContain('tbl_status');
   });
 
   test('managed deploy-plan CLI reads env-file and returns JSON status', () => {
