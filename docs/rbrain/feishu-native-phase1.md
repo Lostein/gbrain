@@ -206,6 +206,9 @@ The local adapter:
 - lets `runManagedTrigger` sync inline normalized assets supplied in the
   request, so a Miaoda/server-function runtime can hand off one Feishu source
   item without first writing a local mirror file
+- validates inline asset request fields at the managed trigger/API boundary so
+  malformed Miaoda/server-function payloads fail with stable field-level errors
+  before sync or Aily upload begins
 - adds `handleManagedTriggerRequest` for HTTP-style server functions with JSON
   request/response handling and error redaction
 - prints a deployable TypeScript wrapper with
@@ -279,7 +282,7 @@ Local tests:
 - direct `runManagedSyncJob` invocation without the CLI dispatcher
 - direct `runManagedTrigger` invocation for server-function `status` and `sync`
   requests, inline normalized asset sync without a mirror root, plus
-  `refresh-status` state refresh
+  request-shape validation and `refresh-status` state refresh
 - managed probe/canary request construction with inline normalized assets and
   no mirror root
 - HTTP trigger wrapper coverage for method rejection and PostgreSQL URL

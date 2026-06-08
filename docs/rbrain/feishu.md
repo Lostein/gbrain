@@ -410,7 +410,10 @@ await runManagedTrigger({
 
 For Feishu-native runtimes that already fetched and normalized one source item
 inside Miaoda/server functions, `sync` can accept inline assets without a mirror
-root when the registry store is Postgres:
+root when the registry store is Postgres. `assets` must be an array of JSON
+objects. Each item requires non-empty string `sourceUri` and `content` fields;
+optional `title`, `normalizedTextUri`, `sourceUrl`, and `ailyAssetTitle` values
+must also be strings when present:
 
 ```ts
 await runManagedTrigger({
@@ -433,6 +436,11 @@ await runManagedTrigger({
   env: process.env,
 });
 ```
+
+The trigger validates inline asset shape before sync starts, so platform callers
+get stable field errors such as `managed inline asset 1 sourceUrl must be a
+string.` instead of late-stage upload or registry failures. The HTTP wrapper
+continues to redact tokens and database URLs from returned errors.
 
 Inline assets reuse the same Aily upload, hash-skip, registry, and Base mirror
 path as mirror-file sync. `sourceUri` becomes the registry source URI;

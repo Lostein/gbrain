@@ -48,6 +48,7 @@ import {
   buildManagedEnvCheck,
   buildManagedDeployBundleFiles,
   buildManagedDeployPlan,
+  buildManagedInlineAssetCandidates,
   buildManagedTriggerProbeRequest,
   buildMirrorReadme,
   buildMirrorGitignore,
@@ -719,6 +720,65 @@ describe('rbrain feishu command helpers', () => {
     expect(fetchCalls[1]!.body).not.toContain('aily-secret-token');
     expect(JSON.stringify(result)).not.toContain('aily-secret-token');
     expect(JSON.stringify(result)).not.toContain('secret-password');
+  });
+
+  test('managed trigger validates inline asset request shape before sync', async () => {
+    await expect(runManagedTrigger({
+      request: {
+        action: 'sync',
+        registry: {
+          store: 'postgres',
+          url: 'postgresql://user:secret-password@example.com:5432/rbrain',
+          ensureSchema: true,
+        },
+        assets: {
+          sourceUri: 'https://feishu.example/doc/roadmap',
+          content: '# Roadmap\n\nOnline source text.\n',
+        } as any,
+      },
+      env: {},
+    })).rejects.toThrow('managed trigger request.assets must be an array.');
+
+    await expect(runManagedTrigger({
+      request: {
+        action: 'sync',
+        registry: {
+          store: 'postgres',
+          url: 'postgresql://user:secret-password@example.com:5432/rbrain',
+          ensureSchema: true,
+        },
+        assets: [{
+          sourceUri: 123,
+          content: '# Roadmap\n\nOnline source text.\n',
+        }] as any,
+      },
+      env: {},
+    })).rejects.toThrow('managed inline asset 1 sourceUri must be a string.');
+
+    await expect(runManagedTrigger({
+      request: {
+        action: 'sync',
+        registry: {
+          store: 'postgres',
+          url: 'postgresql://user:secret-password@example.com:5432/rbrain',
+          ensureSchema: true,
+        },
+        assets: [{
+          sourceUri: 'https://feishu.example/doc/roadmap',
+          sourceUrl: 123,
+          content: '# Roadmap\n\nOnline source text.\n',
+        }] as any,
+      },
+      env: {},
+    })).rejects.toThrow('managed inline asset 1 sourceUrl must be a string.');
+  });
+
+  test('managed inline asset candidates validate direct API inputs', () => {
+    expect(() => buildManagedInlineAssetCandidates([{
+      sourceUri: 'https://feishu.example/doc/roadmap',
+      sourceUrl: 123,
+      content: '# Roadmap\n\nOnline source text.\n',
+    } as any])).toThrow('managed inline asset 1 sourceUrl must be a string.');
   });
 
   test('managed trigger can refresh Aily status for a server function', async () => {
