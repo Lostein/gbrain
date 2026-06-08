@@ -300,7 +300,8 @@ Local tests:
   inline source-input helper/fetcher contract, and no embedded secrets
 - generated deployment bundle coverage for trigger, local smoke-test server,
   package manifest, SQL, env example, README, inline source-input mode, inline
-  fetcher example, and overwrite protection
+  fetcher example, local debug routes, inline fetcher auto-registration, and
+  overwrite protection
 - managed env-check coverage for required variables, canary refresh-status
   token requirements, optional Base mirror pairing, and no value leakage
 - managed deploy-plan coverage for ordered rollout commands, missing config
@@ -317,6 +318,9 @@ Manual platform checks:
   clearly names the remaining blocked environment keys.
 - The generated `feishu-managed-local-server.ts` can serve the same trigger
   locally and answer `managed canary --status-only`.
+- For inline bundles, the generated local server imports the fetcher example
+  and can exercise the scheduled debug route with
+  `RBRAIN_FEISHU_INLINE_SOURCES_JSON`.
 - A server-function `sync` request can include inline normalized assets and use
   the Postgres registry without requiring a local mirror root.
 - `rbrain feishu managed status --registry-store postgres --registry-ensure-schema`

@@ -248,7 +248,8 @@ The bundle writes:
 - `feishu-managed-trigger.ts` for HTTP/manual, scheduled sync, status, and
   refresh-status entrypoints
 - `feishu-managed-local-server.ts` for local Bun smoke tests before platform
-  deployment
+  deployment, including `__rbrain` debug routes for status, scheduled sync,
+  and refresh-status
 - `feishu-managed-registry.sql` for the managed Postgres tables
 - `package.json` for installing the runtime dependency that exports
   `gbrain/feishu-managed`
@@ -367,7 +368,8 @@ The generated template imports `handleManagedTriggerRequest` from
 `refreshStatus` functions, and only names environment variables. Each generated
 entrypoint accepts an optional `env`/bindings object for server-function
 platforms; when it is not supplied, the local smoke server falls back to
-`process.env`. Inline templates also export
+`process.env`. The generated local server also exposes `__rbrain` debug routes
+for status, scheduled sync, and refresh-status. Inline templates also export
 `configureInlineAssetFetcher(fetcher)` for scheduled runs and
 `syncInlineAssets(assets, trigger, env)` for manual handoff. The fetcher is the
 platform-specific piece that uses Miaoda/server-function APIs to fetch Feishu
@@ -376,7 +378,8 @@ adapter uploads them to Aily. It does not embed tokens or database URLs.
 `deploy-bundle --source-input inline` also writes
 `feishu-inline-fetcher.example.ts`, which can smoke-test from
 `RBRAIN_FEISHU_INLINE_SOURCES_JSON` and then be edited to call the tenant's
-Feishu API.
+Feishu API. The inline local server imports that example so the scheduled debug
+route exercises fetcher registration before platform deployment.
 Configure these variables in the target platform:
 
 ```text
