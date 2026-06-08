@@ -214,6 +214,10 @@ The local adapter:
 - writes a complete starter bundle with `rbrain feishu managed deploy-bundle`,
   including the trigger wrapper, local smoke-test server, runtime
   `package.json`, Postgres DDL, `.env.example`, and deployment README
+- lets `trigger-template --source-input inline` and
+  `deploy-bundle --source-input inline` generate runtime files that omit
+  `RBRAIN_FEISHU_MIRROR_ROOT` and expose a `syncInlineAssets` helper for the
+  platform fetch/normalize step
 - checks runtime environment readiness with `rbrain feishu managed env-check`
   without printing secret values
 - prints a secret-safe, ordered online rollout checklist with
@@ -281,9 +285,11 @@ Local tests:
 - HTTP trigger wrapper coverage for method rejection and PostgreSQL URL
   redaction
 - generated trigger template coverage for public import path,
-  scheduled/status/refresh-status entrypoints, and no embedded secrets
+  scheduled/status/refresh-status entrypoints, inline source-input helper, and
+  no embedded secrets
 - generated deployment bundle coverage for trigger, local smoke-test server,
-  package manifest, SQL, env example, README, and overwrite protection
+  package manifest, SQL, env example, README, inline source-input mode, and
+  overwrite protection
 - managed env-check coverage for required variables, canary refresh-status
   token requirements, optional Base mirror pairing, and no value leakage
 - managed deploy-plan coverage for ordered rollout commands, missing config

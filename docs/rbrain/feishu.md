@@ -232,6 +232,7 @@ For an online trigger, first emit the deployable TypeScript wrapper:
 
 ```bash
 rbrain feishu managed trigger-template > feishu-managed-trigger.ts
+rbrain feishu managed trigger-template --source-input inline > feishu-managed-trigger.ts
 rbrain feishu managed trigger-template --json
 ```
 
@@ -239,6 +240,7 @@ For a complete deployment starter, generate the bundle instead:
 
 ```bash
 rbrain feishu managed deploy-bundle --out ./feishu-managed-deploy
+rbrain feishu managed deploy-bundle --source-input inline --out ./feishu-managed-deploy
 ```
 
 The bundle writes:
@@ -250,7 +252,8 @@ The bundle writes:
 - `feishu-managed-registry.sql` for the managed Postgres tables
 - `package.json` for installing the runtime dependency that exports
   `gbrain/feishu-managed`
-- `.env.example` with required environment variable names
+- `.env.example` with required environment variable names for the selected
+  source input mode
 - `README.md` with deployment and smoke-test steps
 
 By default the command refuses to overwrite existing files. Pass `--force` only
@@ -361,8 +364,11 @@ request open.
 
 The generated template imports `handleManagedTriggerRequest` from
 `gbrain/feishu-managed`, exposes HTTP `handler`, `scheduled`, `status`, and
-`refreshStatus` functions, and only names environment variables. It does not
-embed tokens or database URLs. Configure these variables in the target platform:
+`refreshStatus` functions, and only names environment variables. Inline
+templates also export `syncInlineAssets(assets, trigger)` so a Miaoda/server
+function can fetch and normalize Feishu items before calling the managed sync
+adapter. It does not embed tokens or database URLs. Configure these variables
+in the target platform:
 
 ```text
 RBRAIN_FEISHU_MIRROR_ROOT
@@ -372,6 +378,10 @@ RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN
 RBRAIN_FEISHU_MANAGED_BASE_TOKEN
 RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID
 ```
+
+`RBRAIN_FEISHU_MIRROR_ROOT` is only needed by the default
+`--source-input mirror` template and bundle. `--source-input inline` omits it
+from the generated env list and `.env.example`.
 
 The underlying reusable API is `runManagedTrigger`. It accepts an action of
 `status`, `sync`, or `refresh-status`, reads the same JSON/Postgres store

@@ -345,6 +345,7 @@ describe('rbrain feishu command helpers', () => {
     expect(stdout).toContain('managed base-template [--json]');
     expect(stdout).toContain('managed trigger-template [--json]');
     expect(stdout).toContain('managed deploy-bundle [--out DIR]');
+    expect(stdout).toContain('[--source-input mirror|inline]');
     expect(stdout).toContain('managed deploy-plan [--url URL]');
     expect(stdout).toContain('managed env-check [--target status|canary|sync]');
     expect(stdout).toContain('[--source-input mirror|inline]');
@@ -903,6 +904,20 @@ describe('rbrain feishu command helpers', () => {
     expect(template).not.toContain('postgresql://user:secret-password');
   });
 
+  test('managed trigger template can target inline source input without mirror root', () => {
+    const template = buildManagedTriggerTemplate({
+      importSpecifier: 'gbrain/feishu-managed',
+      sourceInput: 'inline',
+    });
+
+    expect(template).toContain('export async function syncInlineAssets');
+    expect(template).toContain('Inline scheduled sync must fetch and normalize Feishu items');
+    expect(template).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
+    expect(template).not.toContain('root: env.');
+    expect(template).not.toContain('secret-token');
+    expect(template).not.toContain('postgresql://user:secret-password');
+  });
+
   test('managed trigger-template prints a JSON deployment template', () => {
     const proc = Bun.spawnSync({
       cmd: [
@@ -924,12 +939,14 @@ describe('rbrain feishu command helpers', () => {
     const payload = JSON.parse(proc.stdout.toString()) as {
       language: string;
       import_specifier: string;
+      source_input: string;
       env: string[];
       template: string;
     };
 
     expect(payload.language).toBe('typescript');
     expect(payload.import_specifier).toBe('gbrain/feishu-managed');
+    expect(payload.source_input).toBe('mirror');
     expect(payload.env).toContain('RBRAIN_FEISHU_MIRROR_ROOT');
     expect(payload.env).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
     expect(payload.env).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_ID');
@@ -938,6 +955,36 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.template).toContain('status');
     expect(JSON.stringify(payload)).not.toContain('secret-token');
     expect(JSON.stringify(payload)).not.toContain('postgresql://user:secret-password');
+  });
+
+  test('managed trigger-template JSON can omit mirror env for inline source input', () => {
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'trigger-template',
+        '--json',
+        '--source-input',
+        'inline',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      source_input: string;
+      env: string[];
+      template: string;
+    };
+
+    expect(payload.source_input).toBe('inline');
+    expect(payload.env).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
+    expect(payload.template).toContain('syncInlineAssets');
+    expect(payload.template).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
   });
 
   test('managed deploy bundle files package trigger, schema, env, and README without real secrets', () => {
@@ -969,6 +1016,7 @@ describe('rbrain feishu command helpers', () => {
         gbrain: 'github:Lostein/gbrain',
       },
     });
+    expect(byPath.get('.env.example')).toContain('RBRAIN_FEISHU_MIRROR_ROOT=');
     expect(byPath.get('.env.example')).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL=');
     expect(byPath.get('.env.example')).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=');
     expect(byPath.get('README.md')).toContain('status probe');
@@ -978,6 +1026,23 @@ describe('rbrain feishu command helpers', () => {
     expect(byPath.get('README.md')).toContain('http://127.0.0.1:8787');
     expect(JSON.stringify(files)).not.toContain('secret-token');
     expect(JSON.stringify(files)).not.toContain('postgresql://user:secret-password');
+  });
+
+  test('managed deploy bundle can target inline source input without mirror env', () => {
+    const files = buildManagedDeployBundleFiles({
+      importSpecifier: 'gbrain/feishu-managed',
+      sourceInput: 'inline',
+    });
+    const byPath = new Map(files.map((file) => [file.path, file.content]));
+
+    expect(byPath.get('feishu-managed-trigger.ts')).toContain('syncInlineAssets');
+    expect(byPath.get('feishu-managed-trigger.ts')).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
+    expect(byPath.get('.env.example')).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
+    expect(byPath.get('.env.example')).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL=');
+    expect(byPath.get('README.md')).toContain('Source input mode: `inline`');
+    expect(byPath.get('README.md')).toContain('syncInlineAssets');
+    expect(byPath.get('README.md')).toContain('--source-input inline');
+    expect(byPath.get('README.md')).toContain('--asset-json');
   });
 
   test('managed deploy bundle can point package.json at a custom runtime package', () => {
@@ -1028,6 +1093,7 @@ describe('rbrain feishu command helpers', () => {
       status: string;
       out_dir: string;
       import_specifier: string;
+      source_input: string;
       package_dependency: string;
       files: Array<{ path: string; bytes: number }>;
       env: string[];
@@ -1036,6 +1102,7 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.status).toBe('ok');
     expect(payload.out_dir).toBe(outDir);
     expect(payload.import_specifier).toBe('gbrain/feishu-managed');
+    expect(payload.source_input).toBe('mirror');
     expect(payload.package_dependency).toBe('github:Lostein/gbrain');
     expect(payload.files.map((file) => file.path).sort()).toEqual([
       '.env.example',
@@ -1046,6 +1113,7 @@ describe('rbrain feishu command helpers', () => {
       'package.json',
     ]);
     expect(payload.env).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
+    expect(payload.env).toContain('RBRAIN_FEISHU_MIRROR_ROOT');
     expect(existsSync(join(outDir, 'feishu-managed-trigger.ts'))).toBe(true);
     expect(readFileSync(join(outDir, 'feishu-managed-local-server.ts'), 'utf-8')).toContain('Bun.serve');
     expect(readFileSync(join(outDir, 'feishu-managed-trigger.ts'), 'utf-8')).toContain('handleManagedTriggerRequest');
@@ -1053,6 +1121,40 @@ describe('rbrain feishu command helpers', () => {
     expect(readFileSync(join(outDir, 'package.json'), 'utf-8')).toContain('github:Lostein/gbrain');
     expect(readFileSync(join(outDir, '.env.example'), 'utf-8')).not.toContain('postgresql://');
     expect(JSON.stringify(payload)).not.toContain('secret-token');
+  });
+
+  test('managed deploy-bundle CLI can write inline source-input files', () => {
+    const root = makeTempDir('rbrain-feishu-managed-deploy-inline-');
+    const outDir = join(root, 'bundle');
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        'run',
+        'src/rbrain.ts',
+        'feishu',
+        'managed',
+        'deploy-bundle',
+        '--out',
+        outDir,
+        '--source-input',
+        'inline',
+        '--json',
+      ],
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    const payload = JSON.parse(proc.stdout.toString()) as {
+      source_input: string;
+      env: string[];
+    };
+
+    expect(payload.source_input).toBe('inline');
+    expect(payload.env).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
+    expect(readFileSync(join(outDir, '.env.example'), 'utf-8')).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
+    expect(readFileSync(join(outDir, 'feishu-managed-trigger.ts'), 'utf-8')).toContain('syncInlineAssets');
+    expect(readFileSync(join(outDir, 'README.md'), 'utf-8')).toContain('Source input mode: `inline`');
   });
 
   test('managed deploy-bundle refuses to overwrite existing files without --force', () => {

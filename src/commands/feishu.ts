@@ -6062,6 +6062,7 @@ export interface ManagedTriggerHttpResponse {
 
 export interface ManagedTriggerTemplateOpts {
   importSpecifier?: string;
+  sourceInput?: ManagedSourceInputMode;
 }
 
 interface ManagedTriggerTemplateCliOpts extends ManagedTriggerTemplateOpts {
@@ -6390,12 +6391,90 @@ function parseManagedTriggerTemplate(args: string[]): ManagedTriggerTemplateCliO
   }
   return {
     importSpecifier,
+    sourceInput: parseManagedSourceInputMode(parseFlagValue(args, '--source-input')),
     json: args.includes('--json'),
   };
 }
 
+function managedTriggerTemplateEnv(sourceInput: ManagedSourceInputMode): string[] {
+  return Array.from(MANAGED_TRIGGER_TEMPLATE_ENV)
+    .filter((key) => sourceInput === 'mirror' || key !== MANAGED_MIRROR_ROOT_ENV);
+}
+
 export function buildManagedTriggerTemplate(opts: ManagedTriggerTemplateOpts = {}): string {
   const importSpecifier = opts.importSpecifier ?? MANAGED_TRIGGER_TEMPLATE_IMPORT;
+  const sourceInput = opts.sourceInput ?? 'mirror';
+  const scheduledBody = sourceInput === 'inline'
+    ? `type InlineAsset = {
+  sourceUri: string;
+  content: string;
+  title?: string;
+  normalizedTextUri?: string;
+  sourceUrl?: string;
+  ailyAssetTitle?: string;
+};
+
+async function runInlineSync(env: Env, assets: InlineAsset[], trigger = 'api'): Promise<Response> {
+  const response = await handleManagedTriggerRequest({
+    request: {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'sync',
+        trigger,
+        registry: postgresRegistry(env),
+        aily: {
+          knowledgeSpaceId: env.RBRAIN_AILY_KNOWLEDGE_SPACE_ID,
+          tokenEnv: 'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN',
+        },
+        base: {
+          token: env.RBRAIN_FEISHU_MANAGED_BASE_TOKEN,
+          tableId: env.RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID,
+        },
+        assets,
+      }),
+    },
+    env,
+  });
+  return toWebResponse(response);
+}
+
+export async function syncInlineAssets(assets: InlineAsset[], trigger = 'api'): Promise<Response> {
+  return runInlineSync(runtimeEnv(), assets, trigger);
+}
+
+export async function scheduled(): Promise<Response> {
+  return new Response(JSON.stringify({
+    status: 'manual_required',
+    message: 'Inline scheduled sync must fetch and normalize Feishu items, then call syncInlineAssets(assets, "schedule").',
+  }), {
+    status: 501,
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+  });
+}`
+    : `export async function scheduled(): Promise<Response> {
+  const env = runtimeEnv();
+  const response = await handleManagedTriggerRequest({
+    request: {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'sync',
+        root: env.RBRAIN_FEISHU_MIRROR_ROOT,
+        trigger: 'schedule',
+        registry: postgresRegistry(env),
+        aily: {
+          knowledgeSpaceId: env.RBRAIN_AILY_KNOWLEDGE_SPACE_ID,
+          tokenEnv: 'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN',
+        },
+        base: {
+          token: env.RBRAIN_FEISHU_MANAGED_BASE_TOKEN,
+          tableId: env.RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID,
+        },
+      }),
+    },
+    env,
+  });
+  return toWebResponse(response);
+}`;
   return `import { handleManagedTriggerRequest } from ${JSON.stringify(importSpecifier)};
 
 type Env = Record<string, string | undefined>;
@@ -6431,30 +6510,7 @@ export default async function handler(request: Request): Promise<Response> {
   return toWebResponse(response);
 }
 
-export async function scheduled(): Promise<Response> {
-  const env = runtimeEnv();
-  const response = await handleManagedTriggerRequest({
-    request: {
-      method: 'POST',
-      body: JSON.stringify({
-        action: 'sync',
-        root: env.RBRAIN_FEISHU_MIRROR_ROOT,
-        trigger: 'schedule',
-        registry: postgresRegistry(env),
-        aily: {
-          knowledgeSpaceId: env.RBRAIN_AILY_KNOWLEDGE_SPACE_ID,
-          tokenEnv: 'RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN',
-        },
-        base: {
-          token: env.RBRAIN_FEISHU_MANAGED_BASE_TOKEN,
-          tableId: env.RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID,
-        },
-      }),
-    },
-    env,
-  });
-  return toWebResponse(response);
-}
+${scheduledBody}
 
 export async function status(): Promise<Response> {
   const env = runtimeEnv();
@@ -6498,11 +6554,13 @@ export async function refreshStatus(): Promise<Response> {
 
 function buildManagedTriggerTemplatePayload(opts: ManagedTriggerTemplateOpts = {}) {
   const importSpecifier = opts.importSpecifier ?? MANAGED_TRIGGER_TEMPLATE_IMPORT;
+  const sourceInput = opts.sourceInput ?? 'mirror';
   return {
     language: 'typescript',
     import_specifier: importSpecifier,
-    env: Array.from(MANAGED_TRIGGER_TEMPLATE_ENV),
-    template: buildManagedTriggerTemplate({ importSpecifier }),
+    source_input: sourceInput,
+    env: managedTriggerTemplateEnv(sourceInput),
+    template: buildManagedTriggerTemplate({ importSpecifier, sourceInput }),
   };
 }
 
@@ -6525,6 +6583,7 @@ function parseManagedDeployBundle(args: string[]): ManagedDeployBundleCliOpts {
   return {
     outDir: expandPath(parseFlagValue(args, '--out') ?? parseFlagValue(args, '--dir') ?? MANAGED_DEPLOY_BUNDLE_DEFAULT_DIR),
     importSpecifier,
+    sourceInput: parseManagedSourceInputMode(parseFlagValue(args, '--source-input')),
     packageDependency,
     force: args.includes('--force'),
     json: args.includes('--json'),
@@ -6594,26 +6653,49 @@ console.log(\`RBrain Feishu managed runtime listening on http://127.0.0.1:\${por
 `;
 }
 
-function buildManagedDeployEnvExample(): string {
+function buildManagedDeployEnvExample(sourceInput: ManagedSourceInputMode = 'mirror'): string {
+  const mirrorRoot = sourceInput === 'mirror' ? `${MANAGED_MIRROR_ROOT_ENV}=\n` : '';
   return `# RBrain Feishu managed runtime environment.
 # Copy these names into your platform secret/env manager.
 # Keep real values out of Git, Base rows, logs, and generated artifacts.
 
-RBRAIN_FEISHU_MIRROR_ROOT=
-RBRAIN_FEISHU_MANAGED_DATABASE_URL=
-RBRAIN_AILY_KNOWLEDGE_SPACE_ID=
-RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN=
-RBRAIN_FEISHU_MANAGED_BASE_TOKEN=
-RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID=
+${mirrorRoot}${MANAGED_REGISTRY_DATABASE_URL_ENV}=
+${AILY_DEFAULT_SPACE_ID_ENV}=
+${AILY_DEFAULT_TOKEN_ENV}=
+${MANAGED_BASE_TOKEN_ENV}=
+${MANAGED_BASE_TABLE_ID_ENV}=
 `;
 }
 
-function buildManagedDeployReadme(opts: { importSpecifier: string }): string {
+function buildManagedDeployReadme(opts: { importSpecifier: string; sourceInput: ManagedSourceInputMode }): string {
+  const sourceInputArgs = managedSourceInputArgs(opts.sourceInput);
+  const sourceInputLabel = opts.sourceInput;
+  const syncProbeCommands = opts.sourceInput === 'inline'
+    ? `rbrain feishu managed probe --action sync --asset-json ${shellArg(MANAGED_INLINE_CANARY_ASSET_JSON)} --json
+rbrain feishu managed probe --action sync --asset-json ${shellArg(MANAGED_INLINE_CANARY_ASSET_JSON)} --url https://your-runtime.example/trigger --json
+rbrain feishu managed canary --asset-json ${shellArg(MANAGED_INLINE_CANARY_ASSET_JSON)} --url https://your-runtime.example/trigger --json
+rbrain feishu managed canary --asset-json ${shellArg(MANAGED_INLINE_CANARY_ASSET_JSON)} --url https://your-runtime.example/trigger --no-dry-run --wait-status --json`
+    : `rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --json
+rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
+rbrain feishu managed probe --action sync --asset-json ${shellArg(MANAGED_INLINE_CANARY_ASSET_JSON)} --url https://your-runtime.example/trigger --json
+rbrain feishu managed canary --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
+rbrain feishu managed canary --asset-json ${shellArg(MANAGED_INLINE_CANARY_ASSET_JSON)} --url https://your-runtime.example/trigger --json
+rbrain feishu managed canary --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --no-dry-run --wait-status --json`;
+  const inlineRuntimeNote = opts.sourceInput === 'inline'
+    ? `
+Inline bundles do not require \`${MANAGED_MIRROR_ROOT_ENV}\`. The generated
+trigger exports \`syncInlineAssets(assets, trigger)\`; call it after the Miaoda
+or server-function runtime fetches and normalizes Feishu source items.
+`
+    : '';
   return `# RBrain Feishu Managed Runtime Bundle
 
 This directory is generated by \`${brand()} feishu managed deploy-bundle\`.
 It packages the pieces needed to deploy the managed registry control plane to
 Miaoda or another TypeScript server-function runtime.
+
+Source input mode: \`${sourceInputLabel}\`.
+${inlineRuntimeNote}
 
 ## Files
 
@@ -6645,11 +6727,9 @@ rbrain feishu managed provision-registry --registry-url "$RBRAIN_FEISHU_MANAGED_
 4. Check the runtime configuration without printing secret values:
 
 \`\`\`bash
-rbrain feishu managed env-check --target canary --env-file .env.example --json
-rbrain feishu managed env-check --target canary --source-input inline --env-file .env.example --json
-rbrain feishu managed env-check --target sync --json
-rbrain feishu managed deploy-plan --url https://your-runtime.example/trigger --json
-rbrain feishu managed deploy-plan --source-input inline --url https://your-runtime.example/trigger --json
+rbrain feishu managed env-check --target canary${sourceInputArgs} --env-file .env.example --json
+rbrain feishu managed env-check --target sync${sourceInputArgs} --json
+rbrain feishu managed deploy-plan${sourceInputArgs} --url https://your-runtime.example/trigger --json
 \`\`\`
 
 5. Optional local smoke test before platform deployment:
@@ -6670,15 +6750,10 @@ rbrain feishu managed probe --action status --url https://your-runtime.example/t
 rbrain feishu managed canary --url https://your-runtime.example/trigger --status-only --json
 \`\`\`
 
-8. Run a dry-run sync probe with a small mirror root and verify:
+8. Run a dry-run sync probe and verify:
 
 \`\`\`bash
-rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --json
-rbrain feishu managed probe --action sync --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
-rbrain feishu managed probe --action sync --asset-json '{"sourceUri":"https://feishu.example/doc/smoke","normalizedTextUri":"feishu/docs/smoke.md","content":"# Smoke\\n\\nInline sample text."}' --url https://your-runtime.example/trigger --json
-rbrain feishu managed canary --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --json
-rbrain feishu managed canary --asset-json '{"sourceUri":"https://feishu.example/doc/smoke","normalizedTextUri":"feishu/docs/smoke.md","content":"# Smoke\\n\\nInline sample text."}' --url https://your-runtime.example/trigger --json
-rbrain feishu managed canary --root /tmp/rbrain-feishu --url https://your-runtime.example/trigger --no-dry-run --wait-status --json
+${syncProbeCommands}
 rbrain feishu managed probe --action refresh-status --url https://your-runtime.example/trigger --json
 rbrain feishu managed wait-status --registry-url "$RBRAIN_FEISHU_MANAGED_DATABASE_URL" --space-id "$RBRAIN_AILY_KNOWLEDGE_SPACE_ID" --json
 \`\`\`
@@ -6701,10 +6776,11 @@ database URLs and known token env values before returning the response body.
 
 export function buildManagedDeployBundleFiles(opts: ManagedDeployBundleOpts = {}): ManagedDeployBundleFileSpec[] {
   const importSpecifier = opts.importSpecifier ?? MANAGED_TRIGGER_TEMPLATE_IMPORT;
+  const sourceInput = opts.sourceInput ?? 'mirror';
   return [
     {
       path: 'feishu-managed-trigger.ts',
-      content: buildManagedTriggerTemplate({ importSpecifier }),
+      content: buildManagedTriggerTemplate({ importSpecifier, sourceInput }),
     },
     {
       path: 'feishu-managed-local-server.ts',
@@ -6723,18 +6799,20 @@ export function buildManagedDeployBundleFiles(opts: ManagedDeployBundleOpts = {}
     },
     {
       path: '.env.example',
-      content: buildManagedDeployEnvExample(),
+      content: buildManagedDeployEnvExample(sourceInput),
     },
     {
       path: 'README.md',
-      content: buildManagedDeployReadme({ importSpecifier }),
+      content: buildManagedDeployReadme({ importSpecifier, sourceInput }),
     },
   ];
 }
 
 function writeManagedDeployBundle(opts: ManagedDeployBundleCliOpts) {
+  const sourceInput = opts.sourceInput ?? 'mirror';
   const files = buildManagedDeployBundleFiles({
     importSpecifier: opts.importSpecifier,
+    sourceInput,
     packageDependency: opts.packageDependency,
   });
   mkdirSync(opts.outDir, { recursive: true });
@@ -6758,12 +6836,13 @@ function writeManagedDeployBundle(opts: ManagedDeployBundleCliOpts) {
     status: 'ok',
     out_dir: opts.outDir,
     import_specifier: opts.importSpecifier,
+    source_input: sourceInput,
     package_dependency: opts.packageDependency,
     files: files.map((file) => ({
       path: file.path,
       bytes: Buffer.byteLength(file.content, 'utf-8'),
     })),
-    env: Array.from(MANAGED_TRIGGER_TEMPLATE_ENV),
+    env: managedTriggerTemplateEnv(sourceInput),
   };
 }
 
@@ -6775,6 +6854,7 @@ function printManagedDeployBundleResult(payload: ReturnType<typeof writeManagedD
   console.log(`Feishu managed deploy bundle: ${payload.status}`);
   console.log(`  out: ${payload.out_dir}`);
   console.log(`  import: ${payload.import_specifier}`);
+  console.log(`  source input: ${payload.source_input}`);
   console.log(`  dependency: ${payload.package_dependency}`);
   console.log(`  files:`);
   for (const file of payload.files) console.log(`  - ${file.path} (${file.bytes} bytes)`);
@@ -8220,10 +8300,11 @@ COMMANDS
   managed base-template [--json]
       Print the Feishu Base field template used by managed sync status mirroring.
 
-  managed trigger-template [--json] [--import SPECIFIER]
+  managed trigger-template [--json] [--import SPECIFIER] [--source-input mirror|inline]
       Print a TypeScript HTTP/scheduled trigger wrapper for managed sync/status.
 
-  managed deploy-bundle [--out DIR] [--import SPECIFIER] [--dependency SPEC] [--force] [--json]
+  managed deploy-bundle [--out DIR] [--import SPECIFIER] [--dependency SPEC]
+                        [--source-input mirror|inline] [--force] [--json]
       Write trigger, local server, package.json, Postgres DDL, env example, and README files for deployment.
 
   managed deploy-plan [--url URL] [--env-file FILE] [--source-input mirror|inline]
@@ -8279,7 +8360,9 @@ EXAMPLES
   ${brand()} feishu aily push-space --space-id knowledge_space_xxx --dry-run
   ${brand()} feishu managed base-template --json
   ${brand()} feishu managed trigger-template > feishu-managed-trigger.ts
+  ${brand()} feishu managed trigger-template --source-input inline > feishu-managed-trigger.ts
   ${brand()} feishu managed deploy-bundle --out ./feishu-managed-deploy --dependency github:Lostein/gbrain --json
+  ${brand()} feishu managed deploy-bundle --source-input inline --out ./feishu-managed-deploy --dependency github:Lostein/gbrain --json
   ${brand()} feishu managed deploy-plan --url https://example.com/trigger --json
   ${brand()} feishu managed deploy-plan --source-input inline --url https://example.com/trigger --json
   ${brand()} feishu managed env-check --target canary --env-file ./feishu-managed-deploy/.env.example --json
