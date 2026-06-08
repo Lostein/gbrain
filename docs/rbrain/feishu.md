@@ -373,6 +373,10 @@ platforms; when it is not supplied, the local smoke server falls back to
 platform-specific piece that uses Miaoda/server-function APIs to fetch Feishu
 items and return normalized `InlineAsset[]` objects before the managed sync
 adapter uploads them to Aily. It does not embed tokens or database URLs.
+`deploy-bundle --source-input inline` also writes
+`feishu-inline-fetcher.example.ts`, which can smoke-test from
+`RBRAIN_FEISHU_INLINE_SOURCES_JSON` and then be edited to call the tenant's
+Feishu API.
 Configure these variables in the target platform:
 
 ```text
@@ -386,7 +390,10 @@ RBRAIN_FEISHU_MANAGED_BASE_TABLE_ID
 
 `RBRAIN_FEISHU_MIRROR_ROOT` is only needed by the default
 `--source-input mirror` template and bundle. `--source-input inline` omits it
-from the generated env list and `.env.example`.
+from the generated env list and `.env.example`. Inline bundles may set
+`RBRAIN_FEISHU_INLINE_SOURCES_JSON` for local smoke tests of
+`feishu-inline-fetcher.example.ts`; production fetchers should usually replace
+that env JSON with tenant-held Feishu API calls.
 
 The underlying reusable API is `runManagedTrigger`. It accepts an action of
 `status`, `sync`, or `refresh-status`, reads the same JSON/Postgres store

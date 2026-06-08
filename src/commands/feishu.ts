@@ -60,6 +60,7 @@ const MANAGED_REGISTRY_DATABASE_URL_ENV = 'RBRAIN_FEISHU_MANAGED_DATABASE_URL';
 const MANAGED_TRIGGER_TEMPLATE_IMPORT = 'gbrain/feishu-managed';
 const MANAGED_DEPLOY_PACKAGE_DEPENDENCY = 'github:Lostein/gbrain';
 const MANAGED_DEPLOY_BUNDLE_DEFAULT_DIR = './feishu-managed-deploy';
+const MANAGED_INLINE_SOURCES_JSON_ENV = 'RBRAIN_FEISHU_INLINE_SOURCES_JSON';
 const MANAGED_INLINE_CANARY_ASSET_JSON = JSON.stringify({
   sourceUri: 'https://feishu.example/doc/smoke',
   normalizedTextUri: 'feishu/docs/smoke.md',
@@ -6697,8 +6698,106 @@ console.log(\`RBrain Feishu managed runtime listening on http://127.0.0.1:\${por
 `;
 }
 
+function buildManagedInlineFetcherExample(): string {
+  return `import {
+  configureInlineAssetFetcher,
+  type InlineAsset,
+  type InlineAssetFetcherContext,
+} from './feishu-managed-trigger.ts';
+
+type InlineSourceConfig = {
+  sourceUri: string;
+  title?: string;
+  normalizedTextUri?: string;
+  sourceUrl?: string;
+  ailyAssetTitle?: string;
+  inlineText?: string;
+};
+
+function parseInlineSources(env: InlineAssetFetcherContext['env']): InlineSourceConfig[] {
+  const raw = env.${MANAGED_INLINE_SOURCES_JSON_ENV};
+  if (!raw?.trim()) return [];
+  const parsed = JSON.parse(raw) as unknown;
+  const inputs = Array.isArray(parsed) ? parsed : [parsed];
+  return inputs.map((input, index) => {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new Error(\`inline source \${index + 1} must be a JSON object.\`);
+    }
+    const source = input as Record<string, unknown>;
+    const sourceUri = readOptionalString(source, 'sourceUri');
+    if (!sourceUri) throw new Error(\`inline source \${index + 1} requires sourceUri.\`);
+    return {
+      sourceUri,
+      title: readOptionalString(source, 'title'),
+      normalizedTextUri: readOptionalString(source, 'normalizedTextUri'),
+      sourceUrl: readOptionalString(source, 'sourceUrl'),
+      ailyAssetTitle: readOptionalString(source, 'ailyAssetTitle'),
+      inlineText: readOptionalString(source, 'inlineText'),
+    };
+  });
+}
+
+function readOptionalString(source: Record<string, unknown>, key: string): string | undefined {
+  const value = source[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') throw new Error(\`inline source \${key} must be a string.\`);
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function normalizeSourceText(source: InlineSourceConfig, text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) throw new Error(\`inline source \${source.sourceUri} returned empty text.\`);
+  const title = source.title ?? source.normalizedTextUri ?? source.sourceUri;
+  return [
+    \`# \${title}\`,
+    '',
+    \`Source: \${source.sourceUrl ?? source.sourceUri}\`,
+    '',
+    trimmed,
+  ].join('\\n');
+}
+
+export function buildInlineAssetFromText(source: InlineSourceConfig, text: string): InlineAsset {
+  return {
+    sourceUri: source.sourceUri,
+    title: source.title,
+    normalizedTextUri: source.normalizedTextUri,
+    sourceUrl: source.sourceUrl,
+    ailyAssetTitle: source.ailyAssetTitle,
+    content: normalizeSourceText(source, text),
+  };
+}
+
+async function readSourceText(_context: InlineAssetFetcherContext, source: InlineSourceConfig): Promise<string> {
+  if (source.inlineText) return source.inlineText;
+  throw new Error(
+    \`inline source \${source.sourceUri} needs readSourceText() to call the tenant Feishu API and return normalized text.\`,
+  );
+}
+
+export async function fetchInlineAssets(context: InlineAssetFetcherContext): Promise<InlineAsset[]> {
+  const sources = parseInlineSources(context.env);
+  const assets: InlineAsset[] = [];
+  for (const source of sources) {
+    const text = await readSourceText(context, source);
+    assets.push(buildInlineAssetFromText(source, text));
+  }
+  return assets;
+}
+
+configureInlineAssetFetcher(fetchInlineAssets);
+`;
+}
+
 function buildManagedDeployEnvExample(sourceInput: ManagedSourceInputMode = 'mirror'): string {
   const mirrorRoot = sourceInput === 'mirror' ? `${MANAGED_MIRROR_ROOT_ENV}=\n` : '';
+  const inlineSources = sourceInput === 'inline'
+    ? `# Optional local smoke source list for feishu-inline-fetcher.example.ts.
+# Replace inlineText with tenant Feishu API fetch logic before production.
+${MANAGED_INLINE_SOURCES_JSON_ENV}=[{"sourceUri":"https://feishu.example/doc/smoke","normalizedTextUri":"feishu/docs/smoke.md","inlineText":"Smoke inline text."}]
+`
+    : '';
   return `# RBrain Feishu managed runtime environment.
 # Copy these names into your platform secret/env manager.
 # Keep real values out of Git, Base rows, logs, and generated artifacts.
@@ -6708,6 +6807,7 @@ ${AILY_DEFAULT_SPACE_ID_ENV}=
 ${AILY_DEFAULT_TOKEN_ENV}=
 ${MANAGED_BASE_TOKEN_ENV}=
 ${MANAGED_BASE_TABLE_ID_ENV}=
+${inlineSources}
 `;
 }
 
@@ -6734,6 +6834,11 @@ that uses the Miaoda/server-function platform APIs to fetch Feishu source items
 and return normalized \`InlineAsset[]\` objects.
 `
     : '';
+  const inlineFetcherFile = opts.sourceInput === 'inline'
+    ? `- \`feishu-inline-fetcher.example.ts\`: editable inline source fetcher example
+  for \`--source-input inline\` bundles.
+`
+    : '';
   return `# RBrain Feishu Managed Runtime Bundle
 
 This directory is generated by \`${brand()} feishu managed deploy-bundle\`.
@@ -6748,7 +6853,7 @@ ${inlineRuntimeNote}
 - \`feishu-managed-trigger.ts\`: HTTP, scheduled sync, status, and
   refresh-status entrypoints.
   It imports \`handleManagedTriggerRequest\` from \`${opts.importSpecifier}\`.
-- \`feishu-managed-local-server.ts\`: local Bun HTTP server for deployment
+${inlineFetcherFile}- \`feishu-managed-local-server.ts\`: local Bun HTTP server for deployment
   smoke tests before uploading the trigger to a platform.
 - \`feishu-managed-registry.sql\`: Postgres DDL for managed sources, assets,
   and sync runs.
@@ -6830,7 +6935,7 @@ Feishu fetch behavior.
 export function buildManagedDeployBundleFiles(opts: ManagedDeployBundleOpts = {}): ManagedDeployBundleFileSpec[] {
   const importSpecifier = opts.importSpecifier ?? MANAGED_TRIGGER_TEMPLATE_IMPORT;
   const sourceInput = opts.sourceInput ?? 'mirror';
-  return [
+  const files: ManagedDeployBundleFileSpec[] = [
     {
       path: 'feishu-managed-trigger.ts',
       content: buildManagedTriggerTemplate({ importSpecifier, sourceInput }),
@@ -6859,6 +6964,13 @@ export function buildManagedDeployBundleFiles(opts: ManagedDeployBundleOpts = {}
       content: buildManagedDeployReadme({ importSpecifier, sourceInput }),
     },
   ];
+  if (sourceInput === 'inline') {
+    files.splice(1, 0, {
+      path: 'feishu-inline-fetcher.example.ts',
+      content: buildManagedInlineFetcherExample(),
+    });
+  }
+  return files;
 }
 
 function writeManagedDeployBundle(opts: ManagedDeployBundleCliOpts) {
