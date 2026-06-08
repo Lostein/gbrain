@@ -1071,6 +1071,7 @@ describe('rbrain feishu command helpers', () => {
       '.env.example',
       'README.md',
       'feishu-managed-local-server.ts',
+      'feishu-managed-local-smoke.ts',
       'feishu-managed-registry.sql',
       'feishu-managed-trigger.ts',
       'package.json',
@@ -1084,6 +1085,10 @@ describe('rbrain feishu command helpers', () => {
     expect(byPath.get('feishu-managed-local-server.ts')).toContain('/__rbrain/refresh-status');
     expect(byPath.get('feishu-managed-local-server.ts')).not.toContain('feishu-inline-fetcher.example.ts');
     expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(byPath.get('feishu-managed-local-server.ts') ?? '')).not.toThrow();
+    expect(byPath.get('feishu-managed-local-smoke.ts')).toContain("import { status } from './feishu-managed-trigger.ts'");
+    expect(byPath.get('feishu-managed-local-smoke.ts')).toContain("await assertOkResponse('status', await status())");
+    expect(byPath.get('feishu-managed-local-smoke.ts')).not.toContain('scheduled');
+    expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(byPath.get('feishu-managed-local-smoke.ts') ?? '')).not.toThrow();
     expect(byPath.get('feishu-managed-registry.sql')).toContain('feishu_managed_assets');
     expect(JSON.parse(byPath.get('package.json') ?? '{}')).toMatchObject({
       name: 'rbrain-feishu-managed-runtime',
@@ -1091,6 +1096,7 @@ describe('rbrain feishu command helpers', () => {
       type: 'module',
       scripts: {
         start: 'bun run feishu-managed-local-server.ts',
+        'smoke:local': 'bun run feishu-managed-local-smoke.ts',
       },
       dependencies: {
         gbrain: 'github:Lostein/gbrain',
@@ -1102,7 +1108,9 @@ describe('rbrain feishu command helpers', () => {
     expect(byPath.get('README.md')).toContain('status probe');
     expect(byPath.get('README.md')).toContain('managed deploy-plan');
     expect(byPath.get('README.md')).toContain('managed canary');
+    expect(byPath.get('README.md')).toContain('feishu-managed-local-smoke.ts');
     expect(byPath.get('README.md')).toContain('handler(request, env)');
+    expect(byPath.get('README.md')).toContain('bun run smoke:local');
     expect(byPath.get('README.md')).toContain('bun run start');
     expect(byPath.get('README.md')).toContain('http://127.0.0.1:8787');
     expect(byPath.get('README.md')).toContain('/__rbrain/status');
@@ -1123,6 +1131,7 @@ describe('rbrain feishu command helpers', () => {
       'README.md',
       'feishu-inline-fetcher.example.ts',
       'feishu-managed-local-server.ts',
+      'feishu-managed-local-smoke.ts',
       'feishu-managed-registry.sql',
       'feishu-managed-trigger.ts',
       'package.json',
@@ -1134,6 +1143,10 @@ describe('rbrain feishu command helpers', () => {
     expect(byPath.get('feishu-managed-local-server.ts')).toContain("import './feishu-inline-fetcher.example.ts'");
     expect(byPath.get('feishu-managed-local-server.ts')).toContain('/__rbrain/scheduled');
     expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(byPath.get('feishu-managed-local-server.ts') ?? '')).not.toThrow();
+    expect(byPath.get('feishu-managed-local-smoke.ts')).toContain("import './feishu-inline-fetcher.example.ts'");
+    expect(byPath.get('feishu-managed-local-smoke.ts')).toContain("await assertOkResponse('scheduled', await scheduled(), { rejectSkipped: true })");
+    expect(byPath.get('feishu-managed-local-smoke.ts')).toContain('RBRAIN_FEISHU_INLINE_SOURCES_JSON');
+    expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(byPath.get('feishu-managed-local-smoke.ts') ?? '')).not.toThrow();
     expect(byPath.get('.env.example')).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
     expect(byPath.get('.env.example')).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL=');
     expect(byPath.get('.env.example')).toContain('RBRAIN_FEISHU_INLINE_SOURCES_JSON=');
@@ -1143,13 +1156,15 @@ describe('rbrain feishu command helpers', () => {
     expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(byPath.get('feishu-inline-fetcher.example.ts') ?? '')).not.toThrow();
     expect(byPath.get('README.md')).toContain('Source input mode: `inline`');
     expect(byPath.get('README.md')).toContain('feishu-inline-fetcher.example.ts');
+    expect(byPath.get('README.md')).toContain('feishu-managed-local-smoke.ts');
     expect(byPath.get('README.md')).toContain('configureInlineAssetFetcher');
     expect(byPath.get('README.md')).toContain('syncInlineAssets');
+    expect(byPath.get('README.md')).toContain('bun run smoke:local');
     expect(byPath.get('README.md')).toContain('--source-input inline');
     expect(byPath.get('README.md')).toContain('--asset-json');
     expect(byPath.get('README.md')).toContain('RBRAIN_FEISHU_INLINE_SOURCES_JSON');
     expect(byPath.get('README.md')).toContain('/__rbrain/scheduled');
-    expect(byPath.get('README.md')).toContain('curl -sS -X POST http://127.0.0.1:8787/__rbrain/scheduled');
+    expect(byPath.get('README.md')).toContain('curl -fsS -X POST http://127.0.0.1:8787/__rbrain/scheduled');
   });
 
   test('managed deploy bundle can point package.json at a custom runtime package', () => {
@@ -1215,6 +1230,7 @@ describe('rbrain feishu command helpers', () => {
       '.env.example',
       'README.md',
       'feishu-managed-local-server.ts',
+      'feishu-managed-local-smoke.ts',
       'feishu-managed-registry.sql',
       'feishu-managed-trigger.ts',
       'package.json',
@@ -1222,10 +1238,12 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.env).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL');
     expect(payload.env).toContain('RBRAIN_FEISHU_MIRROR_ROOT');
     expect(existsSync(join(outDir, 'feishu-managed-trigger.ts'))).toBe(true);
+    expect(readFileSync(join(outDir, 'feishu-managed-local-smoke.ts'), 'utf-8')).toContain('assertOkResponse');
     expect(readFileSync(join(outDir, 'feishu-managed-local-server.ts'), 'utf-8')).toContain('Bun.serve');
     expect(readFileSync(join(outDir, 'feishu-managed-trigger.ts'), 'utf-8')).toContain('handleManagedTriggerRequest');
     expect(readFileSync(join(outDir, 'feishu-managed-registry.sql'), 'utf-8')).toContain('feishu_managed_sync_runs');
     expect(readFileSync(join(outDir, 'package.json'), 'utf-8')).toContain('github:Lostein/gbrain');
+    expect(readFileSync(join(outDir, 'package.json'), 'utf-8')).toContain('smoke:local');
     expect(readFileSync(join(outDir, '.env.example'), 'utf-8')).not.toContain('postgresql://');
     expect(JSON.stringify(payload)).not.toContain('secret-token');
   });
@@ -1262,6 +1280,7 @@ describe('rbrain feishu command helpers', () => {
     expect(readFileSync(join(outDir, '.env.example'), 'utf-8')).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
     expect(readFileSync(join(outDir, '.env.example'), 'utf-8')).toContain('RBRAIN_FEISHU_INLINE_SOURCES_JSON');
     expect(readFileSync(join(outDir, 'feishu-inline-fetcher.example.ts'), 'utf-8')).toContain('fetchInlineAssets');
+    expect(readFileSync(join(outDir, 'feishu-managed-local-smoke.ts'), 'utf-8')).toContain('scheduled');
     expect(readFileSync(join(outDir, 'feishu-managed-trigger.ts'), 'utf-8')).toContain('syncInlineAssets');
     expect(readFileSync(join(outDir, 'README.md'), 'utf-8')).toContain('Source input mode: `inline`');
   });
@@ -1314,6 +1333,7 @@ describe('rbrain feishu command helpers', () => {
       'env-check',
       'provision-registry',
       'deploy-trigger',
+      'local-function-smoke',
       'start-local-runtime',
       'local-smoke',
       'status-canary',
@@ -1322,6 +1342,12 @@ describe('rbrain feishu command helpers', () => {
       'agent-answer-check',
     ]);
     expect(plan.steps.find((step) => step.id === 'deploy-trigger')?.command).not.toContain('--source-input inline');
+    expect(plan.steps.find((step) => step.id === 'local-function-smoke')).toMatchObject({
+      status: 'manual',
+      depends_on: ['deploy-trigger'],
+    });
+    expect(plan.steps.find((step) => step.id === 'local-function-smoke')?.command).toContain('bun run smoke:local');
+    expect(plan.steps.find((step) => step.id === 'start-local-runtime')?.depends_on).toEqual(['local-function-smoke']);
     expect(plan.steps.find((step) => step.id === 'local-smoke')).toMatchObject({
       status: 'manual',
       depends_on: ['start-local-runtime'],
@@ -1351,6 +1377,7 @@ describe('rbrain feishu command helpers', () => {
 
     const envCheckStep = plan.steps.find((step) => step.id === 'env-check');
     const deployTrigger = plan.steps.find((step) => step.id === 'deploy-trigger');
+    const localFunctionSmoke = plan.steps.find((step) => step.id === 'local-function-smoke');
     const startLocalRuntime = plan.steps.find((step) => step.id === 'start-local-runtime');
     const localSmoke = plan.steps.find((step) => step.id === 'local-smoke');
     const productionCanary = plan.steps.find((step) => step.id === 'production-canary');
@@ -1361,6 +1388,8 @@ describe('rbrain feishu command helpers', () => {
     expect(plan.missing_required_env_keys).toEqual([]);
     expect(envCheckStep?.command).toContain('--source-input inline');
     expect(deployTrigger?.command).toContain('deploy-bundle --source-input inline');
+    expect(localFunctionSmoke?.title).toContain('inline scheduled function smoke');
+    expect(localFunctionSmoke?.command).toContain('bun run smoke:local');
     expect(startLocalRuntime?.command).toContain('bun run start');
     expect(localSmoke?.title).toContain('inline scheduled smoke');
     expect(localSmoke?.command).toContain('/__rbrain/scheduled');
@@ -1392,6 +1421,9 @@ describe('rbrain feishu command helpers', () => {
       status: 'blocked',
     });
     expect(plan.steps.find((step) => step.id === 'local-smoke')).toMatchObject({
+      status: 'blocked',
+    });
+    expect(plan.steps.find((step) => step.id === 'local-function-smoke')).toMatchObject({
       status: 'blocked',
     });
   });
@@ -1437,6 +1469,7 @@ describe('rbrain feishu command helpers', () => {
 
     expect(payload.status).toBe('ready');
     expect(payload.trigger_url).toBe('https://runtime.example/trigger');
+    expect(payload.steps.find((step) => step.id === 'local-function-smoke')?.command).toContain('bun run smoke:local');
     expect(payload.steps.find((step) => step.id === 'start-local-runtime')?.command).toContain('bun run start');
     expect(payload.steps.find((step) => step.id === 'local-smoke')?.command).toContain('http://127.0.0.1:8787');
     expect(payload.steps.find((step) => step.id === 'production-canary')?.command).toContain('--wait-status');
@@ -1490,6 +1523,7 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.source_input).toBe('inline');
     expect(payload.missing_required_env_keys).toEqual([]);
     expect(payload.steps.find((step) => step.id === 'deploy-trigger')?.command).toContain('--source-input inline');
+    expect(payload.steps.find((step) => step.id === 'local-function-smoke')?.command).toContain('bun run smoke:local');
     expect(payload.steps.find((step) => step.id === 'start-local-runtime')?.command).toContain('bun run start');
     expect(payload.steps.find((step) => step.id === 'local-smoke')?.command).toContain('/__rbrain/scheduled');
     expect(payload.steps.find((step) => step.id === 'production-canary')?.command).toContain('--asset-json');

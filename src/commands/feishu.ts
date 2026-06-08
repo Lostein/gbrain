@@ -6670,6 +6670,7 @@ function buildManagedDeployPackageJson(opts: ManagedDeployBundleOpts = {}): stri
     type: 'module',
     scripts: {
       start: 'bun run feishu-managed-local-server.ts',
+      'smoke:local': 'bun run feishu-managed-local-smoke.ts',
     },
     dependencies: {
       [packageName]: packageDependency,
@@ -6710,6 +6711,68 @@ Bun.serve({
 
 console.log(\`RBrain Feishu managed runtime listening on http://127.0.0.1:\${port}\`);
 console.log('Local debug routes: /__rbrain/status, /__rbrain/scheduled, /__rbrain/refresh-status');
+`;
+}
+
+function buildManagedDeployLocalSmoke(opts: { sourceInput?: ManagedSourceInputMode } = {}): string {
+  const sourceInput = opts.sourceInput ?? 'mirror';
+  const imports = sourceInput === 'inline'
+    ? `import './feishu-inline-fetcher.example.ts';
+import { scheduled, status } from './feishu-managed-trigger.ts';
+`
+    : `import { status } from './feishu-managed-trigger.ts';
+`;
+  const scheduledSmoke = sourceInput === 'inline'
+    ? `
+  await assertOkResponse('scheduled', await scheduled(), { rejectSkipped: true });
+`
+    : '';
+  return `${imports}
+type JsonRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): JsonRecord | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as JsonRecord
+    : undefined;
+}
+
+async function parseResponseJson(name: string, response: Response): Promise<JsonRecord> {
+  const text = await response.text();
+  try {
+    return asRecord(JSON.parse(text)) ?? {};
+  } catch {
+    throw new Error(\`\${name} returned non-JSON response: \${text.slice(0, 160)}\`);
+  }
+}
+
+async function assertOkResponse(
+  name: string,
+  response: Response,
+  opts: { rejectSkipped?: boolean } = {},
+): Promise<void> {
+  const body = await parseResponseJson(name, response);
+  const result = asRecord(body.result);
+  const statusValue = typeof body.status === 'string' ? body.status : undefined;
+  const resultStatus = typeof result?.status === 'string' ? result.status : undefined;
+  if (!response.ok || statusValue === 'error' || statusValue === 'manual_required') {
+    throw new Error(\`\${name} failed: \${JSON.stringify(body)}\`);
+  }
+  if (opts.rejectSkipped && resultStatus === 'skipped') {
+    throw new Error(
+      \`\${name} skipped without content. Set ${MANAGED_INLINE_SOURCES_JSON_ENV} for local smoke, or replace the generated fetcher with tenant Feishu API logic.\`,
+    );
+  }
+  console.log(\`\${name}: \${response.status} \${statusValue ?? resultStatus ?? 'ok'}\`);
+}
+
+async function main(): Promise<void> {
+  await assertOkResponse('status', await status());${scheduledSmoke}
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});
 `;
 }
 
@@ -6857,12 +6920,13 @@ and return normalized \`InlineAsset[]\` objects.
   const inlineLocalSmokeNote = opts.sourceInput === 'inline'
     ? `
 Inline bundles also import \`feishu-inline-fetcher.example.ts\` from the local
-server, so \`http://127.0.0.1:8787/__rbrain/scheduled\` exercises the generated
-fetcher registration path with \`${MANAGED_INLINE_SOURCES_JSON_ENV}\` before the
-same code is moved into a platform scheduled task.
+server and local smoke script, so \`bun run smoke:local\` and
+\`http://127.0.0.1:8787/__rbrain/scheduled\` exercise the generated fetcher
+registration path with \`${MANAGED_INLINE_SOURCES_JSON_ENV}\` before the same
+code is moved into a platform scheduled task.
 
 \`\`\`bash
-curl -sS -X POST http://127.0.0.1:8787/__rbrain/scheduled
+curl -fsS -X POST http://127.0.0.1:8787/__rbrain/scheduled
 \`\`\`
 `
     : '';
@@ -6883,6 +6947,8 @@ ${inlineRuntimeNote}
 ${inlineFetcherFile}- \`feishu-managed-local-server.ts\`: local Bun HTTP server for deployment
   smoke tests before uploading the trigger to a platform. It also exposes
   local debug routes for \`status\`, \`scheduled\`, and \`refresh-status\`.
+- \`feishu-managed-local-smoke.ts\`: direct local function smoke test for the
+  generated status entrypoint and, in inline mode, the scheduled fetcher path.
 - \`feishu-managed-registry.sql\`: Postgres DDL for managed sources, assets,
   and sync runs.
 - \`package.json\`: runtime dependency manifest that installs the package
@@ -6915,6 +6981,7 @@ rbrain feishu managed deploy-plan${sourceInputArgs} --url https://your-runtime.e
 
 \`\`\`bash
 bun install
+bun run smoke:local
 bun run start
 rbrain feishu managed canary --url http://127.0.0.1:8787 --status-only --json
 rbrain feishu managed probe --action status --url http://127.0.0.1:8787/__rbrain/status --json
@@ -6973,6 +7040,10 @@ export function buildManagedDeployBundleFiles(opts: ManagedDeployBundleOpts = {}
     {
       path: 'feishu-managed-local-server.ts',
       content: buildManagedDeployLocalServer({ sourceInput }),
+    },
+    {
+      path: 'feishu-managed-local-smoke.ts',
+      content: buildManagedDeployLocalSmoke({ sourceInput }),
     },
     {
       path: 'feishu-managed-registry.sql',
@@ -7295,6 +7366,7 @@ export function buildManagedDeployPlan(opts: {
   const productionCanaryInput = sourceInput === 'inline'
     ? `--asset-json ${shellArg(MANAGED_INLINE_CANARY_ASSET_JSON)}`
     : `--root "$${MANAGED_MIRROR_ROOT_ENV}"`;
+  const localFunctionSmokeCommand = `cd ${shellArg(MANAGED_DEPLOY_BUNDLE_DEFAULT_DIR)} && bun install && bun run smoke:local`;
   const startLocalRuntimeCommand = `cd ${shellArg(MANAGED_DEPLOY_BUNDLE_DEFAULT_DIR)} && bun install && bun run start`;
   const localSmokeCommand = sourceInput === 'inline'
     ? [
@@ -7332,11 +7404,21 @@ export function buildManagedDeployPlan(opts: {
       depends_on: ['provision-registry'],
     }),
     managedDeployStep({
+      id: 'local-function-smoke',
+      title: sourceInput === 'inline'
+        ? 'Run local direct status and inline scheduled function smoke'
+        : 'Run local direct status function smoke',
+      status: hasMissingEnv ? 'blocked' : 'manual',
+      command: localFunctionSmokeCommand,
+      reason: missingEnvReason,
+      depends_on: ['deploy-trigger'],
+    }),
+    managedDeployStep({
       id: 'start-local-runtime',
       title: 'Start the generated local runtime in a separate terminal',
       status: 'manual',
       command: startLocalRuntimeCommand,
-      depends_on: ['deploy-trigger'],
+      depends_on: ['local-function-smoke'],
     }),
     managedDeployStep({
       id: 'local-smoke',

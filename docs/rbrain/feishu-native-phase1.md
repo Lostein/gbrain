@@ -318,9 +318,10 @@ Manual platform checks:
   clearly names the remaining blocked environment keys.
 - The generated `feishu-managed-local-server.ts` can serve the same trigger
   locally and answer `managed canary --status-only`.
-- For inline bundles, deploy-plan tells the operator to start the generated
-  local runtime in one terminal, then exercise the scheduled debug route with
-  `RBRAIN_FEISHU_INLINE_SOURCES_JSON` in another terminal.
+- For inline bundles, deploy-plan tells the operator to run the direct local
+  function smoke, start the generated local runtime in one terminal, then
+  exercise the scheduled debug route with `RBRAIN_FEISHU_INLINE_SOURCES_JSON`
+  in another terminal.
 - A server-function `sync` request can include inline normalized assets and use
   the Postgres registry without requiring a local mirror root.
 - `rbrain feishu managed status --registry-store postgres --registry-ensure-schema`
@@ -353,10 +354,10 @@ Manual platform checks:
 3. Run `managed deploy-plan --source-input inline --url ... --env-file ...`
    and keep its JSON output as the canonical rollout checklist for the target
    runtime.
-4. Follow the deploy-plan `start-local-runtime` and `local-smoke` steps: run
-   the generated local server, `managed canary --url
-   http://127.0.0.1:8787 --status-only`, and for inline bundles the scheduled
-   debug route before uploading the trigger.
+4. Follow the deploy-plan `local-function-smoke`, `start-local-runtime`, and
+   `local-smoke` steps: run `bun run smoke:local`, start the generated local
+   server, `managed canary --url http://127.0.0.1:8787 --status-only`, and for
+   inline bundles the scheduled debug route before uploading the trigger.
 5. Send one inline normalized Feishu source item through the managed trigger
    and confirm it writes an Aily asset plus registry row.
 6. Optionally run `managed sync --registry-store postgres` against the target
