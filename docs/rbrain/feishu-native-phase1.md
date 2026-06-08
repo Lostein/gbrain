@@ -226,6 +226,9 @@ The local adapter:
 - adds a generated `InlineAssetFetcher` registration point so scheduled inline
   sync can call tenant-specific Feishu fetch/normalize code without hardcoding
   a Miaoda API shape into the shared adapter
+- includes a generated `feishu-inline-fetcher.example.ts` file for inline
+  bundles, with an env-JSON smoke path and a clear replacement point for the
+  tenant Feishu API call
 - checks runtime environment readiness with `rbrain feishu managed env-check`
   without printing secret values
 - prints a secret-safe, ordered online rollout checklist with
@@ -296,8 +299,8 @@ Local tests:
   scheduled/status/refresh-status entrypoints, explicit serverless env binding,
   inline source-input helper/fetcher contract, and no embedded secrets
 - generated deployment bundle coverage for trigger, local smoke-test server,
-  package manifest, SQL, env example, README, inline source-input mode, and
-  overwrite protection
+  package manifest, SQL, env example, README, inline source-input mode, inline
+  fetcher example, and overwrite protection
 - managed env-check coverage for required variables, canary refresh-status
   token requirements, optional Base mirror pairing, and no value leakage
 - managed deploy-plan coverage for ordered rollout commands, missing config

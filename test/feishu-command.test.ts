@@ -1100,6 +1100,7 @@ describe('rbrain feishu command helpers', () => {
     expect(byPath.get('README.md')).toContain('handler(request, env)');
     expect(byPath.get('README.md')).toContain('bun run start');
     expect(byPath.get('README.md')).toContain('http://127.0.0.1:8787');
+    expect(byPath.get('README.md')).not.toContain('feishu-inline-fetcher.example.ts');
     expect(JSON.stringify(files)).not.toContain('secret-token');
     expect(JSON.stringify(files)).not.toContain('postgresql://user:secret-password');
   });
@@ -1111,13 +1112,28 @@ describe('rbrain feishu command helpers', () => {
     });
     const byPath = new Map(files.map((file) => [file.path, file.content]));
 
+    expect(Array.from(byPath.keys()).sort()).toEqual([
+      '.env.example',
+      'README.md',
+      'feishu-inline-fetcher.example.ts',
+      'feishu-managed-local-server.ts',
+      'feishu-managed-registry.sql',
+      'feishu-managed-trigger.ts',
+      'package.json',
+    ]);
     expect(byPath.get('feishu-managed-trigger.ts')).toContain('syncInlineAssets');
     expect(byPath.get('feishu-managed-trigger.ts')).toContain('configureInlineAssetFetcher');
     expect(byPath.get('feishu-managed-trigger.ts')).toContain('runtime_env_bound');
     expect(byPath.get('feishu-managed-trigger.ts')).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
     expect(byPath.get('.env.example')).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
     expect(byPath.get('.env.example')).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL=');
+    expect(byPath.get('.env.example')).toContain('RBRAIN_FEISHU_INLINE_SOURCES_JSON=');
+    expect(byPath.get('feishu-inline-fetcher.example.ts')).toContain('configureInlineAssetFetcher(fetchInlineAssets)');
+    expect(byPath.get('feishu-inline-fetcher.example.ts')).toContain('readSourceText');
+    expect(byPath.get('feishu-inline-fetcher.example.ts')).toContain('buildInlineAssetFromText');
+    expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(byPath.get('feishu-inline-fetcher.example.ts') ?? '')).not.toThrow();
     expect(byPath.get('README.md')).toContain('Source input mode: `inline`');
+    expect(byPath.get('README.md')).toContain('feishu-inline-fetcher.example.ts');
     expect(byPath.get('README.md')).toContain('configureInlineAssetFetcher');
     expect(byPath.get('README.md')).toContain('syncInlineAssets');
     expect(byPath.get('README.md')).toContain('--source-input inline');
@@ -1232,6 +1248,8 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.source_input).toBe('inline');
     expect(payload.env).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
     expect(readFileSync(join(outDir, '.env.example'), 'utf-8')).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
+    expect(readFileSync(join(outDir, '.env.example'), 'utf-8')).toContain('RBRAIN_FEISHU_INLINE_SOURCES_JSON');
+    expect(readFileSync(join(outDir, 'feishu-inline-fetcher.example.ts'), 'utf-8')).toContain('fetchInlineAssets');
     expect(readFileSync(join(outDir, 'feishu-managed-trigger.ts'), 'utf-8')).toContain('syncInlineAssets');
     expect(readFileSync(join(outDir, 'README.md'), 'utf-8')).toContain('Source input mode: `inline`');
   });
