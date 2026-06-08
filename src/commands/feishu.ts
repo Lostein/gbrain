@@ -6112,7 +6112,7 @@ interface ManagedCanaryCliOpts extends ManagedTriggerProbeOpts {
   json: boolean;
 }
 
-export type ManagedEnvCheckTarget = 'status' | 'canary' | 'sync';
+export type ManagedEnvCheckTarget = 'capabilities' | 'status' | 'canary' | 'sync';
 export type ManagedSourceInputMode = 'mirror' | 'inline';
 type ManagedEnvCheckStatus = 'ok' | 'warn' | 'fail';
 
@@ -7182,8 +7182,8 @@ function printManagedDeployBundleResult(payload: ReturnType<typeof writeManagedD
 
 function parseManagedEnvCheckTarget(input: string | undefined): ManagedEnvCheckTarget {
   if (input === undefined || input === 'sync') return 'sync';
-  if (input === 'status' || input === 'canary') return input;
-  throw new Error(`--target must be one of status, canary, sync`);
+  if (input === 'capabilities' || input === 'status' || input === 'canary') return input;
+  throw new Error(`--target must be one of capabilities, status, canary, sync`);
 }
 
 function parseManagedSourceInputMode(input: string | undefined): ManagedSourceInputMode {
@@ -7280,8 +7280,8 @@ export function buildManagedEnvCheck(opts: {
   const env = opts.env ?? process.env;
   const target = opts.target ?? 'sync';
   const sourceInput = opts.sourceInput ?? 'mirror';
-  const needsSync = target === 'canary' || target === 'sync';
-  const needsAilyToken = target === 'canary' || target === 'sync';
+  const needsSync = target === 'capabilities' || target === 'canary' || target === 'sync';
+  const needsAilyToken = target === 'capabilities' || target === 'canary' || target === 'sync';
   const checks: ManagedEnvCheckItem[] = [
     managedEnvSingleCheck({
       id: 'serverless_pg',
@@ -7343,7 +7343,9 @@ export function buildManagedEnvCheck(opts: {
   if (hasMissing) {
     nextSteps.push('Set the missing required environment variables in the runtime secret manager.');
   }
-  if (target === 'status') {
+  if (target === 'capabilities') {
+    nextSteps.push('Run managed probe with --action capabilities after deploying the trigger.');
+  } else if (target === 'status') {
     nextSteps.push('Run managed canary with --status-only after deploying the trigger.');
   } else if (sourceInput === 'inline') {
     nextSteps.push('Run managed canary with --asset-json sample content before enabling scheduled inline sync.');
@@ -7929,6 +7931,13 @@ function managedCanaryStep(name: ManagedTriggerAction, probe: ManagedTriggerProb
   };
 }
 
+function managedProbeTopLevelStatus(probe: ManagedTriggerProbeSendResult): string | undefined {
+  const json = probe.response.json;
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return undefined;
+  const status = (json as Record<string, unknown>).status;
+  return typeof status === 'string' ? status : undefined;
+}
+
 function extractManagedRefreshPayload(json: unknown): Record<string, unknown> | null {
   if (!json || typeof json !== 'object' || Array.isArray(json)) return null;
   const obj = json as Record<string, unknown>;
@@ -7984,9 +7993,18 @@ export async function runManagedTriggerCanary(opts: {
     request: capabilitiesRequest,
     fetchImpl: opts.fetchImpl,
   });
-  steps.push(managedCanaryStep('capabilities', capabilitiesProbe));
+  const capabilitiesStatus = managedProbeTopLevelStatus(capabilitiesProbe);
+  const capabilitiesReady = capabilitiesProbe.status === 'ok' &&
+    (capabilitiesStatus === undefined || capabilitiesStatus === 'ok');
+  steps.push({
+    ...managedCanaryStep('capabilities', capabilitiesProbe),
+    status: capabilitiesReady ? 'ok' : 'error',
+    ...(capabilitiesProbe.status === 'ok' && capabilitiesStatus && capabilitiesStatus !== 'ok'
+      ? { reason: `capabilities probe reported ${capabilitiesStatus}` }
+      : {}),
+  });
 
-  if (capabilitiesProbe.status !== 'ok') {
+  if (!capabilitiesReady) {
     steps.push({
       name: 'status',
       status: 'skipped',
@@ -8855,7 +8873,7 @@ COMMANDS
                       [--target-status successful] [--json]
       Print an ordered, secret-safe deployment and verification plan.
 
-  managed env-check [--target status|canary|sync] [--source-input mirror|inline] [--env-file FILE] [--json]
+  managed env-check [--target capabilities|status|canary|sync] [--source-input mirror|inline] [--env-file FILE] [--json]
       Check managed runtime env names without printing secret values.
 
   managed probe [--action capabilities|status|sync|refresh-status] [--root DIR] [--asset-json JSON] [--url URL] [--json]
@@ -8909,6 +8927,7 @@ EXAMPLES
   ${brand()} feishu managed deploy-bundle --source-input inline --out ./feishu-managed-deploy --dependency github:Lostein/gbrain --json
   ${brand()} feishu managed deploy-plan --url https://example.com/trigger --json
   ${brand()} feishu managed deploy-plan --source-input inline --url https://example.com/trigger --json
+  ${brand()} feishu managed env-check --target capabilities --source-input inline --json
   ${brand()} feishu managed env-check --target canary --env-file ./feishu-managed-deploy/.env.example --json
   ${brand()} feishu managed env-check --target canary --source-input inline --json
   ${brand()} feishu managed probe --action capabilities --json

@@ -252,8 +252,8 @@ The local adapter:
 - lets `managed probe --asset-json` construct inline normalized sync requests
   without a mirror root, so operators can test the Feishu-native handoff path
   with sample content from the CLI
-- runs `rbrain feishu managed canary` to execute status first, then dry-run
-  sync, then refresh-status against a deployed trigger URL
+- runs `rbrain feishu managed canary` to execute capabilities first, then
+  status, dry-run sync, and refresh-status against a deployed trigger URL
 - lets `managed canary --asset-json` run the same inline asset path through the
   one-command status/sync/refresh-status smoke test
 - lets `managed canary --wait-status` poll the deployed refresh-status
@@ -311,8 +311,9 @@ Local tests:
   package manifest, SQL, env example, README, inline source-input mode, inline
   fetcher example, local debug routes, inline fetcher auto-registration, and
   overwrite protection
-- managed env-check coverage for required variables, canary refresh-status
-  token requirements, optional Base mirror pairing, and no value leakage
+- managed env-check coverage for capabilities/canary/sync required variables,
+  refresh-status token requirements, optional Base mirror pairing, and no value
+  leakage
 - managed deploy-plan coverage for ordered rollout commands, missing config
   blockers, optional Base status table setup/refresh states, env-file loading,
   inline source input, and no secret/path leakage
@@ -320,7 +321,7 @@ Local tests:
   generation, dry-run default, HTTP POST wiring, and runtime env fallback
 - managed canary coverage for capabilities-before-status sequencing,
   refresh-status after sync, dry-run default, wait-status polling/timeout, and
-  skip behavior after capabilities/status/sync failure
+  skip behavior after capabilities warnings or capabilities/status/sync failure
 
 Manual platform checks:
 

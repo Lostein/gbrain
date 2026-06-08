@@ -264,6 +264,7 @@ Before deploying, check the runtime environment without printing values:
 
 ```bash
 rbrain feishu managed env-check --target canary --env-file ./feishu-managed-deploy/.env.example --json
+rbrain feishu managed env-check --target capabilities --source-input inline --json
 rbrain feishu managed env-check --target canary --source-input inline --json
 rbrain feishu managed env-check --target sync --json
 rbrain feishu managed deploy-plan --url https://example.com/trigger --json
@@ -275,6 +276,8 @@ requires PG, Aily Knowledge Space ID, and the Aily token because the canary
 includes a refresh-status probe. In the default `--source-input mirror` mode it
 also requires `RBRAIN_FEISHU_MIRROR_ROOT`; in `--source-input inline` mode the
 runtime receives normalized asset content in the request body instead.
+`--target capabilities` checks the same readiness names as the deployed
+capabilities probe before any source fetch or Aily call.
 `--target sync` treats the same Aily token as required before real scheduled
 sync or `--no-dry-run`.
 `managed deploy-plan` reuses the canary env check, then prints an ordered,
@@ -376,6 +379,7 @@ rbrain feishu managed canary \
   --json
 ```
 
+If the capabilities step fails or reports `warn`, status and sync are skipped.
 If the status step fails, sync is skipped. If sync fails, refresh-status is
 skipped. Use `--status-only` when validating only Serverless PG and trigger
 reachability before wiring the mirror root. `--wait-status` keeps the wait on
