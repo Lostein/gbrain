@@ -214,6 +214,8 @@ The local adapter:
 - prints a deployable TypeScript wrapper with
   `rbrain feishu managed trigger-template`, importing the public
   `gbrain/feishu-managed` adapter and naming only environment variables
+- lets generated runtime entrypoints accept explicit serverless env/bindings
+  while keeping local smoke tests on `process.env`
 - writes a complete starter bundle with `rbrain feishu managed deploy-bundle`,
   including the trigger wrapper, local smoke-test server, runtime
   `package.json`, Postgres DDL, `.env.example`, and deployment README
@@ -288,8 +290,8 @@ Local tests:
 - HTTP trigger wrapper coverage for method rejection and PostgreSQL URL
   redaction
 - generated trigger template coverage for public import path,
-  scheduled/status/refresh-status entrypoints, inline source-input helper, and
-  no embedded secrets
+  scheduled/status/refresh-status entrypoints, explicit serverless env binding,
+  inline source-input helper, and no embedded secrets
 - generated deployment bundle coverage for trigger, local smoke-test server,
   package manifest, SQL, env example, README, inline source-input mode, and
   overwrite protection

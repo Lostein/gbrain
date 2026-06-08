@@ -6433,21 +6433,28 @@ async function runInlineSync(env: Env, assets: InlineAsset[], trigger = 'api'): 
   return toWebResponse(response);
 }
 
-export async function syncInlineAssets(assets: InlineAsset[], trigger = 'api'): Promise<Response> {
-  return runInlineSync(runtimeEnv(), assets, trigger);
+export async function syncInlineAssets(assets: InlineAsset[], trigger = 'api', envOverride?: Env): Promise<Response> {
+  return runInlineSync(runtimeEnv(envOverride), assets, trigger);
 }
 
-export async function scheduled(): Promise<Response> {
+export async function scheduled(envOverride?: Env): Promise<Response> {
+  const env = runtimeEnv(envOverride);
   return new Response(JSON.stringify({
     status: 'manual_required',
+    runtime_env_bound: Boolean(envOverride),
+    required_env_present: Boolean(
+      env.RBRAIN_FEISHU_MANAGED_DATABASE_URL &&
+      env.RBRAIN_AILY_KNOWLEDGE_SPACE_ID &&
+      env.RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN
+    ),
     message: 'Inline scheduled sync must fetch and normalize Feishu items, then call syncInlineAssets(assets, "schedule").',
   }), {
     status: 501,
     headers: { 'content-type': 'application/json; charset=utf-8' },
   });
 }`
-    : `export async function scheduled(): Promise<Response> {
-  const env = runtimeEnv();
+    : `export async function scheduled(envOverride?: Env): Promise<Response> {
+  const env = runtimeEnv(envOverride);
   const response = await handleManagedTriggerRequest({
     request: {
       method: 'POST',
@@ -6474,7 +6481,8 @@ export async function scheduled(): Promise<Response> {
 
 type Env = Record<string, string | undefined>;
 
-function runtimeEnv(): Env {
+function runtimeEnv(envOverride?: Env): Env {
+  if (envOverride) return envOverride;
   const globalWithProcess = globalThis as typeof globalThis & { process?: { env?: Env } };
   return globalWithProcess.process?.env ?? {};
 }
@@ -6494,21 +6502,22 @@ function postgresRegistry(env: Env) {
   };
 }
 
-export default async function handler(request: Request): Promise<Response> {
+export default async function handler(request: Request, envOverride?: Env): Promise<Response> {
+  const env = runtimeEnv(envOverride);
   const response = await handleManagedTriggerRequest({
     request: {
       method: request.method,
       body: await request.text(),
     },
-    env: runtimeEnv(),
+    env,
   });
   return toWebResponse(response);
 }
 
 ${scheduledBody}
 
-export async function status(): Promise<Response> {
-  const env = runtimeEnv();
+export async function status(envOverride?: Env): Promise<Response> {
+  const env = runtimeEnv(envOverride);
   const response = await handleManagedTriggerRequest({
     request: {
       method: 'POST',
@@ -6522,8 +6531,8 @@ export async function status(): Promise<Response> {
   return toWebResponse(response);
 }
 
-export async function refreshStatus(): Promise<Response> {
-  const env = runtimeEnv();
+export async function refreshStatus(envOverride?: Env): Promise<Response> {
+  const env = runtimeEnv(envOverride);
   const response = await handleManagedTriggerRequest({
     request: {
       method: 'POST',
@@ -6766,6 +6775,10 @@ rbrain feishu managed wait-status --registry-url "$RBRAIN_FEISHU_MANAGED_DATABAS
 The generated trigger accepts POST JSON shaped like \`ManagedTriggerRequest\`.
 It returns JSON with \`action\`, \`status\`, and \`result\`. Errors redact
 database URLs and known token env values before returning the response body.
+Server-function platforms can pass env/bindings as the second argument to
+\`handler(request, env)\`, \`scheduled(env)\`, \`status(env)\`, and
+\`refreshStatus(env)\`. Local Bun smoke tests omit that argument and read
+\`process.env\` instead.
 `;
 }
 
