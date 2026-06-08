@@ -965,6 +965,7 @@ describe('rbrain feishu command helpers', () => {
     expect(template).toContain('RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN');
     expect(template).not.toContain('secret-token');
     expect(template).not.toContain('postgresql://user:secret-password');
+    expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(template)).not.toThrow();
   });
 
   test('managed trigger template can target inline source input without mirror root', () => {
@@ -974,14 +975,21 @@ describe('rbrain feishu command helpers', () => {
     });
 
     expect(template).toContain('export async function syncInlineAssets');
+    expect(template).toContain('export type InlineAsset');
+    expect(template).toContain('type InlineAssetFetcher');
+    expect(template).toContain('export function configureInlineAssetFetcher');
+    expect(template).toContain('configuredInlineAssetFetcher');
+    expect(template).toContain('scheduled(envOverride?: Env, fetcherOverride?: InlineAssetFetcher)');
     expect(template).toContain('syncInlineAssets(assets: InlineAsset[], trigger = \'api\', envOverride?: Env)');
     expect(template).toContain('runtime_env_bound');
     expect(template).toContain('required_env_present');
-    expect(template).toContain('Inline scheduled sync must fetch and normalize Feishu items');
+    expect(template).toContain('Inline scheduled sync must register an InlineAssetFetcher');
+    expect(template).toContain('Inline asset fetcher returned no assets.');
     expect(template).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
     expect(template).not.toContain('root: env.');
     expect(template).not.toContain('secret-token');
     expect(template).not.toContain('postgresql://user:secret-password');
+    expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(template)).not.toThrow();
   });
 
   test('managed trigger-template prints a JSON deployment template', () => {
@@ -1104,11 +1112,13 @@ describe('rbrain feishu command helpers', () => {
     const byPath = new Map(files.map((file) => [file.path, file.content]));
 
     expect(byPath.get('feishu-managed-trigger.ts')).toContain('syncInlineAssets');
+    expect(byPath.get('feishu-managed-trigger.ts')).toContain('configureInlineAssetFetcher');
     expect(byPath.get('feishu-managed-trigger.ts')).toContain('runtime_env_bound');
     expect(byPath.get('feishu-managed-trigger.ts')).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
     expect(byPath.get('.env.example')).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
     expect(byPath.get('.env.example')).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL=');
     expect(byPath.get('README.md')).toContain('Source input mode: `inline`');
+    expect(byPath.get('README.md')).toContain('configureInlineAssetFetcher');
     expect(byPath.get('README.md')).toContain('syncInlineAssets');
     expect(byPath.get('README.md')).toContain('--source-input inline');
     expect(byPath.get('README.md')).toContain('--asset-json');
