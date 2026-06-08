@@ -7280,6 +7280,12 @@ export function buildManagedDeployPlan(opts: {
   const productionCanaryInput = sourceInput === 'inline'
     ? `--asset-json ${shellArg(MANAGED_INLINE_CANARY_ASSET_JSON)}`
     : `--root "$${MANAGED_MIRROR_ROOT_ENV}"`;
+  const localSmokeCommand = sourceInput === 'inline'
+    ? [
+        `rbrain feishu managed canary --url http://127.0.0.1:8787 --status-only --json`,
+        `curl -sS -X POST http://127.0.0.1:8787/__rbrain/scheduled`,
+      ].join(' && ')
+    : `rbrain feishu managed canary --url http://127.0.0.1:8787 --status-only --json`;
   const missingUrlReason = opts.url ? undefined : 'Set --url after deploying the managed trigger HTTP endpoint.';
   const missingEnvReason = hasMissingEnv
     ? `Set required runtime variables first: ${missingRequiredEnvKeys.join(', ')}.`
@@ -7306,8 +7312,18 @@ export function buildManagedDeployPlan(opts: {
       id: 'deploy-trigger',
       title: 'Deploy the generated trigger to Miaoda or a server-function runtime',
       status: 'manual',
-      command: `rbrain feishu managed deploy-bundle --out ${shellArg(MANAGED_DEPLOY_BUNDLE_DEFAULT_DIR)} --json`,
+      command: `rbrain feishu managed deploy-bundle${sourceInputArgs} --out ${shellArg(MANAGED_DEPLOY_BUNDLE_DEFAULT_DIR)} --json`,
       depends_on: ['provision-registry'],
+    }),
+    managedDeployStep({
+      id: 'local-smoke',
+      title: sourceInput === 'inline'
+        ? 'Run local status and inline scheduled smoke before platform upload'
+        : 'Run local status smoke before platform upload',
+      status: hasMissingEnv ? 'blocked' : 'manual',
+      command: localSmokeCommand,
+      reason: missingEnvReason,
+      depends_on: ['deploy-trigger'],
     }),
     managedDeployStep({
       id: 'status-canary',
@@ -7315,7 +7331,7 @@ export function buildManagedDeployPlan(opts: {
       status: canRunRemote ? 'ready' : 'blocked',
       command: `rbrain feishu managed canary --url ${triggerUrlArg} --status-only --json`,
       reason: missingEnvReason ?? missingUrlReason,
-      depends_on: ['deploy-trigger'],
+      depends_on: ['local-smoke'],
     }),
     managedDeployStep({
       id: 'production-canary',
