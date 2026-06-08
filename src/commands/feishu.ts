@@ -4678,30 +4678,22 @@ export function collectAilyPushCandidates(
   return opts.limit ? candidates.slice(0, opts.limit) : candidates;
 }
 
-function normalizeManagedInlineAssetSourceUri(value: string, index: number): string {
-  const trimmed = value.trim();
-  if (!trimmed) throw new Error(`managed inline asset ${index + 1} requires sourceUri.`);
-  return trimmed;
-}
-
 export function buildManagedInlineAssetCandidates(
   assets: ManagedInlineAssetInput[],
   opts: { limit?: number } = {},
 ): AilyPushCandidate[] {
   const limited = opts.limit ? assets.slice(0, opts.limit) : assets;
   return limited.map((asset, index) => {
-    const sourceUri = normalizeManagedInlineAssetSourceUri(asset.sourceUri, index);
-    const content = asset.content;
-    if (typeof content !== 'string' || content.trim() === '') {
-      throw new Error(`managed inline asset ${index + 1} requires non-empty content.`);
-    }
-    const normalizedTextUri = (asset.normalizedTextUri?.trim() || sourceUri);
-    const title = asset.ailyAssetTitle?.trim() || buildAilyAssetTitle(normalizedTextUri);
+    const normalized = normalizeManagedInlineAssetInput(asset, index);
+    const sourceUri = normalized.sourceUri;
+    const content = normalized.content;
+    const normalizedTextUri = normalized.normalizedTextUri ?? sourceUri;
+    const title = normalized.ailyAssetTitle ?? buildAilyAssetTitle(normalizedTextUri);
     return {
       path: normalizedTextUri,
       relative_path: normalizedTextUri,
       title,
-      source_url: asset.sourceUrl?.trim() || sourceUri,
+      source_url: normalized.sourceUrl ?? sourceUri,
       bytes: Buffer.byteLength(content, 'utf-8'),
       content_sha256: createHash('sha256').update(content).digest('hex'),
       content,
@@ -6262,10 +6254,13 @@ export async function runManagedTrigger(input: ManagedTriggerInput = {}) {
   const action = request.action ?? 'status';
   const registry = resolveManagedTriggerRegistry({ request, env });
   const inlineAssetsRaw = (request as { assets?: unknown }).assets;
-  if (inlineAssetsRaw !== undefined && !Array.isArray(inlineAssetsRaw)) {
-    throw new Error('managed trigger request.assets must be an array.');
-  }
-  const inlineAssets = inlineAssetsRaw as ManagedInlineAssetInput[] | undefined;
+  const inlineAssets = inlineAssetsRaw === undefined
+    ? undefined
+    : normalizeManagedInlineAssetInputs(inlineAssetsRaw, {
+        label: 'managed trigger request.assets',
+        allowSingle: false,
+        allowEmpty: true,
+      });
   const root = resolveManagedTriggerRoot({ action, request, env, registryStore: registry.registryStore });
   const sourceId = request.sourceId ?? 'feishu';
 
@@ -7246,7 +7241,7 @@ function parseManagedInlineAssetString(
   return trimmed || undefined;
 }
 
-function parseManagedInlineAssetInput(raw: unknown, index: number): ManagedInlineAssetInput {
+function normalizeManagedInlineAssetInput(raw: unknown, index: number): ManagedInlineAssetInput {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error(`managed inline asset ${index + 1} must be a JSON object.`);
   }
@@ -7274,6 +7269,23 @@ function parseManagedInlineAssetInput(raw: unknown, index: number): ManagedInlin
   return asset;
 }
 
+function normalizeManagedInlineAssetInputs(
+  raw: unknown,
+  opts: { label?: string; allowSingle?: boolean; allowEmpty?: boolean } = {},
+): ManagedInlineAssetInput[] {
+  const label = opts.label ?? 'managed inline assets';
+  const inputs = Array.isArray(raw)
+    ? raw
+    : opts.allowSingle === false
+      ? undefined
+      : [raw];
+  if (!inputs) throw new Error(`${label} must be an array.`);
+  if (inputs.length === 0 && opts.allowEmpty !== true) {
+    throw new Error(`${label} must include at least one asset.`);
+  }
+  return inputs.map((input, index) => normalizeManagedInlineAssetInput(input, index));
+}
+
 function parseManagedInlineAssetJson(raw: string, flagName: string): ManagedInlineAssetInput[] {
   let parsed: unknown;
   try {
@@ -7282,9 +7294,7 @@ function parseManagedInlineAssetJson(raw: string, flagName: string): ManagedInli
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`${flagName} must be valid JSON: ${message}`);
   }
-  const inputs = Array.isArray(parsed) ? parsed : [parsed];
-  if (inputs.length === 0) throw new Error(`${flagName} must include at least one asset.`);
-  return inputs.map((input, index) => parseManagedInlineAssetInput(input, index));
+  return normalizeManagedInlineAssetInputs(parsed, { label: flagName });
 }
 
 function parseManagedInlineAssetJsonFlags(args: string[]): ManagedInlineAssetInput[] | undefined {
