@@ -279,11 +279,14 @@ runtime receives normalized asset content in the request body instead.
 sync or `--no-dry-run`.
 `managed deploy-plan` reuses the canary env check, then prints an ordered,
 secret-safe sequence for registry provisioning, trigger deployment, status-only
-local smoke, deployed status-only canary, production canary with
-`--wait-status`, registry inspection, and the final Aily custom-agent answer
-check. In `--source-input inline` mode the generated deploy-bundle command also
-keeps `--source-input inline`, so the bundle includes the inline fetcher example
-and local scheduled debug route before upload.
+local runtime startup, local smoke, deployed status-only canary, production
+canary with `--wait-status`, registry inspection, and the final Aily
+custom-agent answer check. In `--source-input inline` mode the generated
+deploy-bundle command also keeps `--source-input inline`, so the bundle includes
+the inline fetcher example and local scheduled debug route before upload. If
+`RBRAIN_FEISHU_INLINE_SOURCES_JSON` is not set, env-check warns rather than
+blocking because production fetchers can replace that local sample env with
+tenant Feishu API calls.
 
 Before uploading the trigger to a platform, the generated bundle can be run
 locally with Bun:

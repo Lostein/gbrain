@@ -1314,6 +1314,7 @@ describe('rbrain feishu command helpers', () => {
       'env-check',
       'provision-registry',
       'deploy-trigger',
+      'start-local-runtime',
       'local-smoke',
       'status-canary',
       'production-canary',
@@ -1323,9 +1324,10 @@ describe('rbrain feishu command helpers', () => {
     expect(plan.steps.find((step) => step.id === 'deploy-trigger')?.command).not.toContain('--source-input inline');
     expect(plan.steps.find((step) => step.id === 'local-smoke')).toMatchObject({
       status: 'manual',
-      depends_on: ['deploy-trigger'],
+      depends_on: ['start-local-runtime'],
     });
     expect(plan.steps.find((step) => step.id === 'status-canary')?.depends_on).toEqual(['local-smoke']);
+    expect(plan.steps.find((step) => step.id === 'start-local-runtime')?.command).toContain('bun run start');
     expect(plan.steps.find((step) => step.id === 'production-canary')?.command).toContain('--wait-status');
     expect(plan.steps.find((step) => step.id === 'production-canary')?.command).toContain('--timeout-ms 1000');
     expect(JSON.stringify(plan)).not.toContain('secret-password');
@@ -1349,6 +1351,7 @@ describe('rbrain feishu command helpers', () => {
 
     const envCheckStep = plan.steps.find((step) => step.id === 'env-check');
     const deployTrigger = plan.steps.find((step) => step.id === 'deploy-trigger');
+    const startLocalRuntime = plan.steps.find((step) => step.id === 'start-local-runtime');
     const localSmoke = plan.steps.find((step) => step.id === 'local-smoke');
     const productionCanary = plan.steps.find((step) => step.id === 'production-canary');
     expect(plan.status).toBe('ready');
@@ -1358,8 +1361,10 @@ describe('rbrain feishu command helpers', () => {
     expect(plan.missing_required_env_keys).toEqual([]);
     expect(envCheckStep?.command).toContain('--source-input inline');
     expect(deployTrigger?.command).toContain('deploy-bundle --source-input inline');
+    expect(startLocalRuntime?.command).toContain('bun run start');
     expect(localSmoke?.title).toContain('inline scheduled smoke');
     expect(localSmoke?.command).toContain('/__rbrain/scheduled');
+    expect(localSmoke?.command).toContain('curl -fsS');
     expect(productionCanary?.title).toContain('inline sync canary');
     expect(productionCanary?.command).toContain('--asset-json');
     expect(productionCanary?.command).not.toContain('--root');
@@ -1432,6 +1437,7 @@ describe('rbrain feishu command helpers', () => {
 
     expect(payload.status).toBe('ready');
     expect(payload.trigger_url).toBe('https://runtime.example/trigger');
+    expect(payload.steps.find((step) => step.id === 'start-local-runtime')?.command).toContain('bun run start');
     expect(payload.steps.find((step) => step.id === 'local-smoke')?.command).toContain('http://127.0.0.1:8787');
     expect(payload.steps.find((step) => step.id === 'production-canary')?.command).toContain('--wait-status');
     expect(proc.stdout.toString()).not.toContain('secret-password');
@@ -1484,6 +1490,7 @@ describe('rbrain feishu command helpers', () => {
     expect(payload.source_input).toBe('inline');
     expect(payload.missing_required_env_keys).toEqual([]);
     expect(payload.steps.find((step) => step.id === 'deploy-trigger')?.command).toContain('--source-input inline');
+    expect(payload.steps.find((step) => step.id === 'start-local-runtime')?.command).toContain('bun run start');
     expect(payload.steps.find((step) => step.id === 'local-smoke')?.command).toContain('/__rbrain/scheduled');
     expect(payload.steps.find((step) => step.id === 'production-canary')?.command).toContain('--asset-json');
     expect(proc.stdout.toString()).not.toContain('secret-password');
@@ -1520,12 +1527,41 @@ describe('rbrain feishu command helpers', () => {
       },
     });
 
-    expect(result.status).toBe('ok');
+    expect(result.status).toBe('warn');
     expect(result.source_input).toBe('inline');
     expect(result.checks.find((check) => check.id === 'mirror_root')).toBeUndefined();
+    expect(result.checks.find((check) => check.id === 'inline_smoke_sources')).toMatchObject({
+      status: 'warn',
+      required: false,
+      keys: ['RBRAIN_FEISHU_INLINE_SOURCES_JSON'],
+    });
+    expect(result.next_steps.join('\n')).toContain('RBRAIN_FEISHU_INLINE_SOURCES_JSON');
     expect(JSON.stringify(result)).not.toContain('secret-password');
     expect(JSON.stringify(result)).not.toContain('secret-token');
     expect(JSON.stringify(result)).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
+  });
+
+  test('managed env check accepts inline local smoke sources when present', () => {
+    const result = buildManagedEnvCheck({
+      target: 'canary',
+      sourceInput: 'inline',
+      env: {
+        RBRAIN_FEISHU_MANAGED_DATABASE_URL: 'postgresql://user:secret-password@example.com:5432/rbrain',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_ID: 'knowledge_space_test',
+        RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN: 'secret-token',
+        RBRAIN_FEISHU_INLINE_SOURCES_JSON: '[{"sourceUri":"https://feishu.example/doc/smoke","inlineText":"Smoke text."}]',
+      },
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.checks.find((check) => check.id === 'inline_smoke_sources')).toMatchObject({
+      status: 'ok',
+      required: false,
+      present: ['RBRAIN_FEISHU_INLINE_SOURCES_JSON'],
+    });
+    expect(JSON.stringify(result)).not.toContain('Smoke text');
+    expect(JSON.stringify(result)).not.toContain('secret-password');
+    expect(JSON.stringify(result)).not.toContain('secret-token');
   });
 
   test('managed env check requires Aily token for canary refresh-status coverage', () => {

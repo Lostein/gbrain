@@ -7197,6 +7197,18 @@ export function buildManagedEnvCheck(opts: {
         purpose: 'Aily Knowledge Space API token for sync and refresh-status checks.',
       }),
     );
+    if (sourceInput === 'inline') {
+      checks.push(
+        managedEnvSingleCheck({
+          id: 'inline_smoke_sources',
+          key: MANAGED_INLINE_SOURCES_JSON_ENV,
+          env,
+          required: false,
+          purpose: 'Optional local source list for the generated inline fetcher example.',
+          message: `Set ${MANAGED_INLINE_SOURCES_JSON_ENV} when using the generated inline fetcher example for a contentful local scheduled smoke; production fetchers can read Feishu through platform APIs instead.`,
+        }),
+      );
+    }
   }
 
   checks.push(buildManagedBaseEnvCheck(env));
@@ -7219,6 +7231,9 @@ export function buildManagedEnvCheck(opts: {
   }
   if (checks.find((check) => check.id === 'base_status_table')?.status === 'warn') {
     nextSteps.push('Complete or remove the optional Feishu Base status mirror variables.');
+  }
+  if (checks.find((check) => check.id === 'inline_smoke_sources')?.status === 'warn') {
+    nextSteps.push(`Set ${MANAGED_INLINE_SOURCES_JSON_ENV} for the generated inline fetcher example, or replace it with tenant Feishu API fetch logic.`);
   }
 
   return {
@@ -7280,10 +7295,11 @@ export function buildManagedDeployPlan(opts: {
   const productionCanaryInput = sourceInput === 'inline'
     ? `--asset-json ${shellArg(MANAGED_INLINE_CANARY_ASSET_JSON)}`
     : `--root "$${MANAGED_MIRROR_ROOT_ENV}"`;
+  const startLocalRuntimeCommand = `cd ${shellArg(MANAGED_DEPLOY_BUNDLE_DEFAULT_DIR)} && bun install && bun run start`;
   const localSmokeCommand = sourceInput === 'inline'
     ? [
         `rbrain feishu managed canary --url http://127.0.0.1:8787 --status-only --json`,
-        `curl -sS -X POST http://127.0.0.1:8787/__rbrain/scheduled`,
+        `curl -fsS -X POST http://127.0.0.1:8787/__rbrain/scheduled`,
       ].join(' && ')
     : `rbrain feishu managed canary --url http://127.0.0.1:8787 --status-only --json`;
   const missingUrlReason = opts.url ? undefined : 'Set --url after deploying the managed trigger HTTP endpoint.';
@@ -7316,6 +7332,13 @@ export function buildManagedDeployPlan(opts: {
       depends_on: ['provision-registry'],
     }),
     managedDeployStep({
+      id: 'start-local-runtime',
+      title: 'Start the generated local runtime in a separate terminal',
+      status: 'manual',
+      command: startLocalRuntimeCommand,
+      depends_on: ['deploy-trigger'],
+    }),
+    managedDeployStep({
       id: 'local-smoke',
       title: sourceInput === 'inline'
         ? 'Run local status and inline scheduled smoke before platform upload'
@@ -7323,7 +7346,7 @@ export function buildManagedDeployPlan(opts: {
       status: hasMissingEnv ? 'blocked' : 'manual',
       command: localSmokeCommand,
       reason: missingEnvReason,
-      depends_on: ['deploy-trigger'],
+      depends_on: ['start-local-runtime'],
     }),
     managedDeployStep({
       id: 'status-canary',
@@ -7364,8 +7387,11 @@ export function buildManagedDeployPlan(opts: {
     'Commands intentionally reference environment variable names instead of printing secret values.',
     'Manual steps remain manual because Miaoda deployment and Aily agent chat happen outside the local CLI.',
   ];
-  if (envCheck.status === 'warn') {
+  if (envCheck.checks.find((check) => check.id === 'base_status_table')?.status === 'warn') {
     notes.push('The optional Feishu Base mirror is incomplete; ingestion can still proceed, but the governance table will not be fully updated.');
+  }
+  if (envCheck.checks.find((check) => check.id === 'inline_smoke_sources')?.status === 'warn') {
+    notes.push(`Set ${MANAGED_INLINE_SOURCES_JSON_ENV} to make the generated local inline scheduled smoke move sample content; production fetchers can use tenant Feishu APIs instead.`);
   }
   if (sourceInput === 'inline') {
     notes.push('Inline source-input plans use non-sensitive sample content; replace --asset-json with a Feishu item fetched and normalized by the deployed runtime before production scheduling.');
