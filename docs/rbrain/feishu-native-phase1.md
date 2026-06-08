@@ -223,8 +223,13 @@ The local adapter:
 - prints or POSTs status/sync/refresh-status trigger probes with
   `rbrain feishu managed probe` so real Miaoda deployments can be smoke-tested
   without hand-written JSON
+- lets `managed probe --asset-json` construct inline normalized sync requests
+  without a mirror root, so operators can test the Feishu-native handoff path
+  with sample content from the CLI
 - runs `rbrain feishu managed canary` to execute status first, then dry-run
   sync, then refresh-status against a deployed trigger URL
+- lets `managed canary --asset-json` run the same inline asset path through the
+  one-command status/sync/refresh-status smoke test
 - lets `managed canary --wait-status` poll the deployed refresh-status
   endpoint until Aily reports the requested target state, keeping the long wait
   in the local operator process
@@ -268,6 +273,8 @@ Local tests:
 - direct `runManagedTrigger` invocation for server-function `status` and `sync`
   requests, inline normalized asset sync without a mirror root, plus
   `refresh-status` state refresh
+- managed probe/canary request construction with inline normalized assets and
+  no mirror root
 - HTTP trigger wrapper coverage for method rejection and PostgreSQL URL
   redaction
 - generated trigger template coverage for public import path,

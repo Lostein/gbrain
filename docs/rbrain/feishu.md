@@ -288,6 +288,9 @@ Before or after deployment, generate the exact probe bodies:
 ```bash
 rbrain feishu managed probe --action status --json
 rbrain feishu managed probe --action sync --root ~/rbrain-feishu --json
+rbrain feishu managed probe --action sync \
+  --asset-json '{"sourceUri":"https://feishu.example/doc/smoke","normalizedTextUri":"feishu/docs/smoke.md","content":"# Smoke\n\nInline sample text."}' \
+  --json
 rbrain feishu managed probe --action refresh-status --json
 ```
 
@@ -299,6 +302,10 @@ only after the status probe is healthy:
 ```bash
 rbrain feishu managed probe --action status --url https://example.com/trigger --json
 rbrain feishu managed probe --action sync --root ~/rbrain-feishu --url https://example.com/trigger --json
+rbrain feishu managed probe --action sync \
+  --asset-json '{"sourceUri":"https://feishu.example/doc/smoke","normalizedTextUri":"feishu/docs/smoke.md","content":"# Smoke\n\nInline sample text."}' \
+  --url https://example.com/trigger \
+  --json
 rbrain feishu managed probe --action refresh-status --url https://example.com/trigger --json
 rbrain feishu managed wait-status \
   --registry-url "$RBRAIN_FEISHU_MANAGED_DATABASE_URL" \
@@ -311,6 +318,18 @@ refresh-status:
 
 ```bash
 rbrain feishu managed canary --root ~/rbrain-feishu --url https://example.com/trigger --json
+```
+
+When validating a Feishu-native runtime path, replace `--root` with
+`--asset-json` and pass only non-sensitive sample content from the terminal.
+The deployed Miaoda/server function should normally provide real normalized
+content directly in the trigger request body.
+
+```bash
+rbrain feishu managed canary \
+  --asset-json '{"sourceUri":"https://feishu.example/doc/smoke","normalizedTextUri":"feishu/docs/smoke.md","content":"# Smoke\n\nInline sample text."}' \
+  --url https://example.com/trigger \
+  --json
 ```
 
 For an end-to-end production canary, enable the real sync and let the local CLI
