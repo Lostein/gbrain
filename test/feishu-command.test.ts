@@ -1077,8 +1077,13 @@ describe('rbrain feishu command helpers', () => {
     ]);
     expect(byPath.get('feishu-managed-trigger.ts')).toContain('from "gbrain/feishu-managed"');
     expect(byPath.get('feishu-managed-trigger.ts')).toContain('envOverride?: Env');
-    expect(byPath.get('feishu-managed-local-server.ts')).toContain("import handler from './feishu-managed-trigger.ts'");
+    expect(byPath.get('feishu-managed-local-server.ts')).toContain("import handler, { refreshStatus, scheduled, status } from './feishu-managed-trigger.ts'");
     expect(byPath.get('feishu-managed-local-server.ts')).toContain('Bun.serve');
+    expect(byPath.get('feishu-managed-local-server.ts')).toContain('/__rbrain/status');
+    expect(byPath.get('feishu-managed-local-server.ts')).toContain('/__rbrain/scheduled');
+    expect(byPath.get('feishu-managed-local-server.ts')).toContain('/__rbrain/refresh-status');
+    expect(byPath.get('feishu-managed-local-server.ts')).not.toContain('feishu-inline-fetcher.example.ts');
+    expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(byPath.get('feishu-managed-local-server.ts') ?? '')).not.toThrow();
     expect(byPath.get('feishu-managed-registry.sql')).toContain('feishu_managed_assets');
     expect(JSON.parse(byPath.get('package.json') ?? '{}')).toMatchObject({
       name: 'rbrain-feishu-managed-runtime',
@@ -1100,6 +1105,7 @@ describe('rbrain feishu command helpers', () => {
     expect(byPath.get('README.md')).toContain('handler(request, env)');
     expect(byPath.get('README.md')).toContain('bun run start');
     expect(byPath.get('README.md')).toContain('http://127.0.0.1:8787');
+    expect(byPath.get('README.md')).toContain('/__rbrain/status');
     expect(byPath.get('README.md')).not.toContain('feishu-inline-fetcher.example.ts');
     expect(JSON.stringify(files)).not.toContain('secret-token');
     expect(JSON.stringify(files)).not.toContain('postgresql://user:secret-password');
@@ -1125,6 +1131,9 @@ describe('rbrain feishu command helpers', () => {
     expect(byPath.get('feishu-managed-trigger.ts')).toContain('configureInlineAssetFetcher');
     expect(byPath.get('feishu-managed-trigger.ts')).toContain('runtime_env_bound');
     expect(byPath.get('feishu-managed-trigger.ts')).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
+    expect(byPath.get('feishu-managed-local-server.ts')).toContain("import './feishu-inline-fetcher.example.ts'");
+    expect(byPath.get('feishu-managed-local-server.ts')).toContain('/__rbrain/scheduled');
+    expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(byPath.get('feishu-managed-local-server.ts') ?? '')).not.toThrow();
     expect(byPath.get('.env.example')).not.toContain('RBRAIN_FEISHU_MIRROR_ROOT');
     expect(byPath.get('.env.example')).toContain('RBRAIN_FEISHU_MANAGED_DATABASE_URL=');
     expect(byPath.get('.env.example')).toContain('RBRAIN_FEISHU_INLINE_SOURCES_JSON=');
@@ -1138,6 +1147,9 @@ describe('rbrain feishu command helpers', () => {
     expect(byPath.get('README.md')).toContain('syncInlineAssets');
     expect(byPath.get('README.md')).toContain('--source-input inline');
     expect(byPath.get('README.md')).toContain('--asset-json');
+    expect(byPath.get('README.md')).toContain('RBRAIN_FEISHU_INLINE_SOURCES_JSON');
+    expect(byPath.get('README.md')).toContain('/__rbrain/scheduled');
+    expect(byPath.get('README.md')).toContain('curl -sS -X POST http://127.0.0.1:8787/__rbrain/scheduled');
   });
 
   test('managed deploy bundle can point package.json at a custom runtime package', () => {
