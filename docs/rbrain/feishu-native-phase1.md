@@ -223,6 +223,9 @@ The local adapter:
   `deploy-bundle --source-input inline` generate runtime files that omit
   `RBRAIN_FEISHU_MIRROR_ROOT` and expose a `syncInlineAssets` helper for the
   platform fetch/normalize step
+- adds a generated `InlineAssetFetcher` registration point so scheduled inline
+  sync can call tenant-specific Feishu fetch/normalize code without hardcoding
+  a Miaoda API shape into the shared adapter
 - checks runtime environment readiness with `rbrain feishu managed env-check`
   without printing secret values
 - prints a secret-safe, ordered online rollout checklist with
@@ -291,7 +294,7 @@ Local tests:
   redaction
 - generated trigger template coverage for public import path,
   scheduled/status/refresh-status entrypoints, explicit serverless env binding,
-  inline source-input helper, and no embedded secrets
+  inline source-input helper/fetcher contract, and no embedded secrets
 - generated deployment bundle coverage for trigger, local smoke-test server,
   package manifest, SQL, env example, README, inline source-input mode, and
   overwrite protection

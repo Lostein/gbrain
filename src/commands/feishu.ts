@@ -6400,7 +6400,7 @@ export function buildManagedTriggerTemplate(opts: ManagedTriggerTemplateOpts = {
   const importSpecifier = opts.importSpecifier ?? MANAGED_TRIGGER_TEMPLATE_IMPORT;
   const sourceInput = opts.sourceInput ?? 'mirror';
   const scheduledBody = sourceInput === 'inline'
-    ? `type InlineAsset = {
+    ? `export type InlineAsset = {
   sourceUri: string;
   content: string;
   title?: string;
@@ -6409,7 +6409,56 @@ export function buildManagedTriggerTemplate(opts: ManagedTriggerTemplateOpts = {
   ailyAssetTitle?: string;
 };
 
+export type InlineAssetFetcherContext = {
+  env: Env;
+  trigger: string;
+};
+
+export type InlineAssetFetcher = (context: InlineAssetFetcherContext) => Promise<InlineAsset[]> | InlineAsset[];
+
+let configuredInlineAssetFetcher: InlineAssetFetcher | undefined;
+
+export function configureInlineAssetFetcher(fetcher: InlineAssetFetcher): void {
+  configuredInlineAssetFetcher = fetcher;
+}
+
+function inlineJsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+  });
+}
+
+function inlineManualRequiredResponse(envOverride: Env | undefined): Response {
+  const env = runtimeEnv(envOverride);
+  return inlineJsonResponse(501, {
+    status: 'manual_required',
+    runtime_env_bound: Boolean(envOverride),
+    required_env_present: Boolean(
+      env.RBRAIN_FEISHU_MANAGED_DATABASE_URL &&
+      env.RBRAIN_AILY_KNOWLEDGE_SPACE_ID &&
+      env.RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN
+    ),
+    message: 'Inline scheduled sync must register an InlineAssetFetcher that fetches and normalizes Feishu items.',
+  });
+}
+
+function inlineNoAssetsResponse(trigger: string): Response {
+  return inlineJsonResponse(200, {
+    action: 'sync',
+    status: 'ok',
+    result: {
+      status: 'skipped',
+      source_input: 'inline',
+      trigger,
+      assets_seen: 0,
+      reason: 'Inline asset fetcher returned no assets.',
+    },
+  });
+}
+
 async function runInlineSync(env: Env, assets: InlineAsset[], trigger = 'api'): Promise<Response> {
+  if (Array.isArray(assets) && assets.length === 0) return inlineNoAssetsResponse(trigger);
   const response = await handleManagedTriggerRequest({
     request: {
       method: 'POST',
@@ -6437,21 +6486,12 @@ export async function syncInlineAssets(assets: InlineAsset[], trigger = 'api', e
   return runInlineSync(runtimeEnv(envOverride), assets, trigger);
 }
 
-export async function scheduled(envOverride?: Env): Promise<Response> {
+export async function scheduled(envOverride?: Env, fetcherOverride?: InlineAssetFetcher): Promise<Response> {
   const env = runtimeEnv(envOverride);
-  return new Response(JSON.stringify({
-    status: 'manual_required',
-    runtime_env_bound: Boolean(envOverride),
-    required_env_present: Boolean(
-      env.RBRAIN_FEISHU_MANAGED_DATABASE_URL &&
-      env.RBRAIN_AILY_KNOWLEDGE_SPACE_ID &&
-      env.RBRAIN_AILY_KNOWLEDGE_SPACE_API_TOKEN
-    ),
-    message: 'Inline scheduled sync must fetch and normalize Feishu items, then call syncInlineAssets(assets, "schedule").',
-  }), {
-    status: 501,
-    headers: { 'content-type': 'application/json; charset=utf-8' },
-  });
+  const fetcher = fetcherOverride ?? configuredInlineAssetFetcher;
+  if (!fetcher) return inlineManualRequiredResponse(envOverride);
+  const assets = await fetcher({ env, trigger: 'schedule' });
+  return runInlineSync(env, assets, 'schedule');
 }`
     : `export async function scheduled(envOverride?: Env): Promise<Response> {
   const env = runtimeEnv(envOverride);
@@ -6688,8 +6728,10 @@ rbrain feishu managed canary --root /tmp/rbrain-feishu --url https://your-runtim
   const inlineRuntimeNote = opts.sourceInput === 'inline'
     ? `
 Inline bundles do not require \`${MANAGED_MIRROR_ROOT_ENV}\`. The generated
-trigger exports \`syncInlineAssets(assets, trigger)\`; call it after the Miaoda
-or server-function runtime fetches and normalizes Feishu source items.
+trigger exports \`configureInlineAssetFetcher(fetcher)\` for scheduled runs and
+\`syncInlineAssets(assets, trigger, env)\` for manual handoff. Register a fetcher
+that uses the Miaoda/server-function platform APIs to fetch Feishu source items
+and return normalized \`InlineAsset[]\` objects.
 `
     : '';
   return `# RBrain Feishu Managed Runtime Bundle
@@ -6779,6 +6821,9 @@ Server-function platforms can pass env/bindings as the second argument to
 \`handler(request, env)\`, \`scheduled(env)\`, \`status(env)\`, and
 \`refreshStatus(env)\`. Local Bun smoke tests omit that argument and read
 \`process.env\` instead.
+Inline scheduled sync calls the registered \`InlineAssetFetcher\`. Without one,
+it returns \`manual_required\` instead of trying to guess platform-specific
+Feishu fetch behavior.
 `;
 }
 

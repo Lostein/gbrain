@@ -368,9 +368,12 @@ The generated template imports `handleManagedTriggerRequest` from
 entrypoint accepts an optional `env`/bindings object for server-function
 platforms; when it is not supplied, the local smoke server falls back to
 `process.env`. Inline templates also export
-`syncInlineAssets(assets, trigger, env)` so a Miaoda/server function can fetch
-and normalize Feishu items before calling the managed sync adapter. It does not
-embed tokens or database URLs. Configure these variables in the target platform:
+`configureInlineAssetFetcher(fetcher)` for scheduled runs and
+`syncInlineAssets(assets, trigger, env)` for manual handoff. The fetcher is the
+platform-specific piece that uses Miaoda/server-function APIs to fetch Feishu
+items and return normalized `InlineAsset[]` objects before the managed sync
+adapter uploads them to Aily. It does not embed tokens or database URLs.
+Configure these variables in the target platform:
 
 ```text
 RBRAIN_FEISHU_MIRROR_ROOT
@@ -443,6 +446,27 @@ The trigger validates inline asset shape before sync starts, so platform callers
 get stable field errors such as `managed inline asset 1 sourceUrl must be a
 string.` instead of late-stage upload or registry failures. The HTTP wrapper
 continues to redact tokens and database URLs from returned errors.
+
+For scheduled inline sync, register the platform fetcher during runtime startup:
+
+```ts
+import { configureInlineAssetFetcher, scheduled } from './feishu-managed-trigger';
+
+configureInlineAssetFetcher(async ({ env, trigger }) => {
+  // Use Miaoda/server-function APIs and env-held credentials here.
+  return [{
+    sourceUri: 'https://feishu.example/doc/roadmap',
+    normalizedTextUri: 'feishu/docs/roadmap.md',
+    content: '# Roadmap\n\nNormalized source text.',
+  }];
+});
+
+export { scheduled };
+```
+
+If no fetcher is registered, the generated `scheduled(env)` entrypoint returns a
+`manual_required` JSON response instead of guessing a tenant-specific Feishu API
+flow.
 
 Inline assets reuse the same Aily upload, hash-skip, registry, and Base mirror
 path as mirror-file sync. `sourceUri` becomes the registry source URI;
