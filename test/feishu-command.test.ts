@@ -1987,7 +1987,7 @@ describe('rbrain feishu command helpers', () => {
     expect(result.response.body).not.toContain(pgUrl);
   });
 
-  test('managed canary runs status, dry-run sync, then refresh-status', async () => {
+  test('managed canary runs capabilities, status, dry-run sync, then refresh-status', async () => {
     const calls: Array<{ action?: string; body: Record<string, unknown> }> = [];
     const result = await runManagedTriggerCanary({
       url: 'https://runtime.example/trigger',
@@ -2004,10 +2004,10 @@ describe('rbrain feishu command helpers', () => {
 
     expect(result.status).toBe('ok');
     expect(result.dry_run).toBe(true);
-    expect(calls.map((call) => call.action)).toEqual(['status', 'sync', 'refresh-status']);
-    expect((calls[1]!.body.aily as Record<string, unknown>).dryRun).toBe(true);
+    expect(calls.map((call) => call.action)).toEqual(['capabilities', 'status', 'sync', 'refresh-status']);
     expect((calls[2]!.body.aily as Record<string, unknown>).dryRun).toBe(true);
-    expect(result.steps.map((step) => step.status)).toEqual(['ok', 'ok', 'ok']);
+    expect((calls[3]!.body.aily as Record<string, unknown>).dryRun).toBe(true);
+    expect(result.steps.map((step) => step.status)).toEqual(['ok', 'ok', 'ok', 'ok']);
   });
 
   test('managed canary sends inline assets only during sync step', async () => {
@@ -2031,11 +2031,12 @@ describe('rbrain feishu command helpers', () => {
     });
 
     expect(result.status).toBe('ok');
-    expect(calls.map((call) => call.action)).toEqual(['status', 'sync', 'refresh-status']);
+    expect(calls.map((call) => call.action)).toEqual(['capabilities', 'status', 'sync', 'refresh-status']);
     expect(calls[0]!.body).not.toHaveProperty('assets');
-    expect(calls[1]!.body).not.toHaveProperty('root');
-    expect(calls[1]!.body.assets).toEqual(assets);
-    expect(calls[2]!.body).not.toHaveProperty('assets');
+    expect(calls[1]!.body).not.toHaveProperty('assets');
+    expect(calls[2]!.body).not.toHaveProperty('root');
+    expect(calls[2]!.body.assets).toEqual(assets);
+    expect(calls[3]!.body).not.toHaveProperty('assets');
   });
 
   test('managed canary can wait for refresh-status target state', async () => {
@@ -2081,14 +2082,14 @@ describe('rbrain feishu command helpers', () => {
     });
 
     expect(result.status).toBe('ok');
-    expect(calls).toEqual(['status', 'sync', 'refresh-status', 'refresh-status']);
-    expect(result.steps.map((step) => step.name)).toEqual(['status', 'sync', 'refresh-status', 'wait-status']);
-    expect(result.steps[3]).toMatchObject({
+    expect(calls).toEqual(['capabilities', 'status', 'sync', 'refresh-status', 'refresh-status']);
+    expect(result.steps.map((step) => step.name)).toEqual(['capabilities', 'status', 'sync', 'refresh-status', 'wait-status']);
+    expect(result.steps[4]).toMatchObject({
       name: 'wait-status',
       status: 'ok',
       reason: 'target successful reached after 2 refresh attempts',
     });
-    expect(result.steps[3]!.response?.json).toEqual({
+    expect(result.steps[4]!.response?.json).toEqual({
       action: 'refresh-status',
       status: 'ok',
       result: {
@@ -2140,14 +2141,14 @@ describe('rbrain feishu command helpers', () => {
     });
 
     expect(result.status).toBe('error');
-    expect(calls).toEqual(['status', 'sync', 'refresh-status', 'refresh-status', 'refresh-status']);
-    expect(result.steps.map((step) => step.name)).toEqual(['status', 'sync', 'refresh-status', 'wait-status']);
-    expect(result.steps[3]).toMatchObject({
+    expect(calls).toEqual(['capabilities', 'status', 'sync', 'refresh-status', 'refresh-status', 'refresh-status']);
+    expect(result.steps.map((step) => step.name)).toEqual(['capabilities', 'status', 'sync', 'refresh-status', 'wait-status']);
+    expect(result.steps[4]).toMatchObject({
       name: 'wait-status',
       status: 'error',
       reason: 'target successful not reached after 3 refresh attempts',
     });
-    expect(result.steps[3]!.response?.json).toEqual({
+    expect(result.steps[4]!.response?.json).toEqual({
       action: 'refresh-status',
       status: 'ok',
       result: {
@@ -2159,7 +2160,7 @@ describe('rbrain feishu command helpers', () => {
     });
   });
 
-  test('managed canary skips sync when status fails', async () => {
+  test('managed canary skips status and sync when capabilities fail', async () => {
     const calls: string[] = [];
     const result = await runManagedTriggerCanary({
       url: 'https://runtime.example/trigger',
@@ -2175,10 +2176,42 @@ describe('rbrain feishu command helpers', () => {
     });
 
     expect(result.status).toBe('error');
-    expect(calls).toEqual(['status']);
-    expect(result.steps).toHaveLength(2);
+    expect(calls).toEqual(['capabilities']);
+    expect(result.steps).toHaveLength(3);
     expect(result.steps[0]!.status).toBe('error');
     expect(result.steps[1]).toMatchObject({
+      name: 'status',
+      status: 'skipped',
+      reason: 'capabilities probe failed',
+    });
+    expect(result.steps[2]).toMatchObject({
+      name: 'sync',
+      status: 'skipped',
+      reason: 'capabilities probe failed',
+    });
+  });
+
+  test('managed canary skips sync when status fails', async () => {
+    const calls: string[] = [];
+    const result = await runManagedTriggerCanary({
+      url: 'https://runtime.example/trigger',
+      root: '/tmp/rbrain-feishu',
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        calls.push(String(body.action));
+        return new Response(JSON.stringify({ status: body.action === 'status' ? 'error' : 'ok' }), {
+          status: body.action === 'status' ? 503 : 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+
+    expect(result.status).toBe('error');
+    expect(calls).toEqual(['capabilities', 'status']);
+    expect(result.steps).toHaveLength(3);
+    expect(result.steps[0]!.status).toBe('ok');
+    expect(result.steps[1]!.status).toBe('error');
+    expect(result.steps[2]).toMatchObject({
       name: 'sync',
       status: 'skipped',
       reason: 'status probe failed',
@@ -2201,9 +2234,9 @@ describe('rbrain feishu command helpers', () => {
     });
 
     expect(result.status).toBe('error');
-    expect(calls).toEqual(['status', 'sync']);
-    expect(result.steps).toHaveLength(3);
-    expect(result.steps[2]).toMatchObject({
+    expect(calls).toEqual(['capabilities', 'status', 'sync']);
+    expect(result.steps).toHaveLength(4);
+    expect(result.steps[3]).toMatchObject({
       name: 'refresh-status',
       status: 'skipped',
       reason: 'sync probe failed',

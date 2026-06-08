@@ -299,13 +299,14 @@ Local tests:
 - direct `runManagedTrigger` invocation for server-function `status` and `sync`
   requests, inline normalized asset sync without a mirror root, plus
   request-shape validation and `refresh-status` state refresh
-- managed probe/canary request construction with inline normalized assets and
-  no mirror root
+- managed probe/canary request construction with capabilities-first probing,
+  inline normalized assets, and no mirror root
 - HTTP trigger wrapper coverage for method rejection and PostgreSQL URL
   redaction
 - generated trigger template coverage for public import path,
-  scheduled/status/refresh-status entrypoints, explicit serverless env binding,
-  inline source-input helper/fetcher contract, and no embedded secrets
+  capabilities/scheduled/status/refresh-status entrypoints, explicit
+  serverless env binding, inline source-input helper/fetcher contract, and no
+  embedded secrets
 - generated deployment bundle coverage for trigger, local smoke-test server,
   package manifest, SQL, env example, README, inline source-input mode, inline
   fetcher example, local debug routes, inline fetcher auto-registration, and
@@ -317,9 +318,9 @@ Local tests:
   inline source input, and no secret/path leakage
 - managed probe coverage for capabilities/status/sync/refresh-status request
   generation, dry-run default, HTTP POST wiring, and runtime env fallback
-- managed canary coverage for status-before-sync sequencing, refresh-status
-  after sync, dry-run default, wait-status polling/timeout, and skip behavior
-  after status/sync failure
+- managed canary coverage for capabilities-before-status sequencing,
+  refresh-status after sync, dry-run default, wait-status polling/timeout, and
+  skip behavior after capabilities/status/sync failure
 
 Manual platform checks:
 
